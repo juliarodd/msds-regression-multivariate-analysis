@@ -1,0 +1,593 @@
+---
+title: "Julia Rodd Assignment 2"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 3
+  sansfont: Calibri Light
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE)
+library(tidyverse)
+library(rmarkdown)
+library(forcats)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(reshape2)
+library(rockchalk)
+library(scatterplot3d)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/jrodd-msds-projects/410_Regression/code")
+```
+
+# Introduction
+
+This assignment uses housing data from Ames, IA from 2006 - 2010 and expands upon the analyses drawn from Assignment 1. The overall goal of this assignment is to select two variables to predict the sale price of a home and to incorporate these variables into a regression model. Both simple linear regression and multiple linear regression models are created using a subset of the Ames data set. Ultimately, commentary is provided on significance and goodness fit of our various models with conclusions made on model selection and implications. The R ggplot and dplyr packages are the two primary packages used in this assignment.
+
+# Results
+
+```{r}
+# read in our data
+ames <- read.csv(file="../data/ames_housing_data.csv",head=TRUE,sep=",")
+
+# define additional variables
+ames <- ames %>%
+  mutate(TotalFloorSF = FirstFlrSF + SecondFlrSF,
+         HouseAge = YrSold - YearBuilt,
+         QualityIndex = OverallQual * OverallCond,
+         logSalePrice = log(SalePrice),
+         PriceSqFt = SalePrice/TotalFloorSF)
+
+# define subset
+ames_subdat <- ames %>%
+  select(TotalFloorSF, HouseAge, QualityIndex, PriceSqFt, SalePrice, LotArea, BsmtFinSF1, Neighborhood, HouseStyle, LotShape, OverallQual, logSalePrice, TotalBsmtSF, HouseStyle, BldgType, KitchenAbvGr, KitchenQual, FullBath, BedroomAbvGr)
+```
+
+## Section 1: Sample Definition
+
+In order to select the two most promising predictors, it is important to first understand the distribution of our data. This information will help to validate that we are selecting the appropriate homes (observations) to predict SalePrice.
+
+```{r, histogram function}
+hist_function <- function(varx, fill_color, break_min, break_max, step_size, titlex, xlabel="", ylabel=""){
+  median_total <- format(round(median(ames_subdat[[varx]]),0),scientific=F)
+  mean_total <- format(round(mean(ames_subdat[[varx]]),0),scientific=F)
+  
+  ames_subdat %>%
+    ggplot(aes(x=ames_subdat[[varx]])) + 
+    geom_histogram(fill = cbPalette[fill_color], breaks=seq(break_min, break_max, by = step_size)) +
+    labs(title=titlex, x=xlabel, y=ylabel) +
+    theme(text = element_text(size = 10, face = "bold")) + 
+    scale_y_continuous(labels = scales::comma) +
+    scale_x_continuous(labels = scales::comma) +
+    geom_vline(aes(xintercept = as.numeric(median_total)), color = "black", linetype = "dashed", size = 1) +
+    geom_vline(aes(xintercept = as.numeric(mean_total)), color = "purple", linetype = "dashed", size = 1) 
+}
+```
+
+```{r}
+totalfloor_hist <- hist_function("TotalFloorSF", 6, 334,5642, 100, title="TotalFloorSF", ylabel="Count")
+
+saleprice_hist <- hist_function("SalePrice", 6, 12790, 755000, 10000, titlex="SalePrice")
+
+grid.arrange(totalfloor_hist,saleprice_hist, ncol = 2, widths=9:10,top=textGrob("Histograms of TotalFloorSF and Sale Price", gp=gpar(fontsize=14, fontface = "bold")),bottom=textGrob("NOTE: Median values are displayed as the dashed black line\nand Mean values are displayed as the purple dashed line", gp=gpar(fontsize=8, fontface = "bold")))
+
+```
+
+From the histograms above, we can see that there is a wide range of both TotalFloorSF and SalePrice. There are also a couple homes in the right tails of both distributions that seem to fall outside the 'typical' distribution.
+
+In calculating the IQR for TotalFloorSF, we can use this metric to identify if we have any extreme outliers. Overall, we have 8 extreme outliers (TotalFloorSF >= 3600). Similarly, using the IQR of SalePrice, there are 26 houses that are extreme outliers (SalePrice >= 465500). Only three of these homes with a SalePrice >= 465500 also have a TotalFloorSF >= 3600. We can see that these upper sale prices are pulling the mean (purple line) away from the median (black line).
+
+We will keep the outlier information into consideration. Now, we will examine the distribution of homes by HouseAge and QualityIndex.
+<br>
+
+```{r}
+# house age
+age_hist <- hist_function("HouseAge",6,0,136,10, title="HouseAge",ylabel="Count of Homes")
+
+# qualityindex
+qualityindex_hist <- hist_function("QualityIndex",6,1,90,5, title="QualityIndex", xlabel="QualityIndex")
+
+grid.arrange(age_hist, qualityindex_hist, ncol = 2, widths = 9:10, top=textGrob("HouseAge and QualityIndex Distributions", gp=gpar(fontsize=14, fontface = "bold")),bottom=textGrob("*Median values are the dashed black line\nand Mean values are the purple dashed line", gp=gpar(fontsize=8, fontface = "bold")))
+```
+
+From the histogram of HouseAge, we can see that the majority of the homes are between 0-10 years of age. Furthermore, we can see that there is a wide range of house ages, but that the mean and median values are close together. There are 0 homes that are considered extreme outliers. 
+
+Examining QualityIndex, we see similar trends from other histograms. There is a wide range of quality index, and the mean/median values are very close together and even in the center of the distribution. There are 11 homes that are considered extreme outliers (QualityIndex >= 70).
+
+We continue our analysis by examining the distribution of homes by BldgType.
+
+```{r}
+# bldg type spread
+bldgtype_count <- ames_subdat %>%
+  group_by(BldgType) %>%
+  arrange(BldgType) %>%
+  summarise(count=n()) %>%
+  mutate(percent = count / sum(count))
+
+# bldgtype plot
+bldgtype_dist <- bldgtype_count %>%
+  ggplot(aes(x=reorder(BldgType, desc(count)), y=count, fill=cbPalette[3:7])) + 
+  geom_bar(stat="identity") +
+  labs(title="BldgType Distribution", x = "BldgType", y = "Count of Homes") +
+  geom_text(aes(label=count),vjust = -.5, size = 2.5, fontface = "bold.italic") +
+  geom_text(aes(label=paste(round(percent*100,0),"%",sep="")),position=position_stack(vjust=.5), size = 2.5, fontface = "bold.italic") +
+  theme(text = element_text(size = 10, face = "bold")) + 
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill=FALSE)
+
+grid.arrange(bldgtype_dist, ncol = 1)
+
+```
+
+From the bar chart of BldgType, we can readily see that the majority of the homes in our data set (83%) are single family houses. This observation is a key point and will drive how we form our sample data set, as the characteristics of a home, including their sale price, vary by the type of building. 
+
+From this bar chart, we can make two conclusions:
+
+1. BldgType will not be a good predictor in a regression model, since the majority of the data falls into one category, single family home (1Fam); and,
+2. A 'typical' Ames house is a single family home
+
+It is unknown how representative this data set is of the building types actually present in Ames. However, we can still move forward with our analysis without this information.
+
+### Drop Conditions
+Because our primary goal is to create a regression model with SalePrice as our response variable, we need to be cognizant of outliers and the types of homes in our data set.
+
+We will refine our goal as creating a regression model for **typical** Ames houses. We define a typical Ames house as:
+
+1. A single family home (BldgType == "1Fam");
+2. Houses with a total square feet < 3,600 (TotalFloorSF < 3600); and,
+3. Houses a sale price < 465,500 (SalePrice < 465500)
+
+In defining our data this way, we remove 536 homes from our data set and are left with 2394 homes to model. Even though we are removing a large portion of homes from our data set, this sample data set will be easier to model, as we will not have additional variability by trying to model different building types.
+
+For now, we do not elect to refine our data set by QualityIndex. However, this may be one criterion to revisit to potentially improve model fit.
+
+```{r,QualBinVar function}
+# function to transform quality into a bucket/categorical variable
+QualBinVar = function(qual) {
+  ifelse(qual >= 90, "90-\n99",
+         ifelse(qual >= 80, "80-\n89",
+                ifelse(qual >= 70, "70-\n79",
+                       ifelse(qual >= 60, "60-\n69",
+                              ifelse(qual >= 50, "50-\n59",
+                                     ifelse(qual >= 40, "40-\n49",
+                                            ifelse(qual >=30, "30-\n39",
+                                                   ifelse(qual >= 20, "20-\n29",
+                                                          ifelse(qual >= 10, "10-\n19", "0-\n9")))))))))
+}
+
+```
+
+```{r}
+# define our dataset for typical houses
+ames_subdat <- ames_subdat %>%
+  filter(BldgType == "1Fam" & TotalFloorSF < 3600 & SalePrice < 465500) %>%
+  # create a new binned var for quality index
+  mutate(QualityIndexBin = QualBinVar(QualityIndex))
+```
+
+## Section 2: Exploratory Data Analysis
+
+We will now explore our sample data set and identify two promising predictors to include in our regression model.
+
+It is important to note that we will be creating both simple linear regression and multiple linear regression models. Because of this, we will need to focus our exploratory data analysis on continuous predictors. Where possible, we will incorporate some analyses with categorical variables, since analyzing categorical variables will help to inform future considerations.
+
+We start our analysis by examining the distribution of two of our quality indices, QualityIndex (OverallQual * OverallCond) and OverallQual side by side. Our hypothesis is that the price of a home varies by its quality, which is why we are spending time exploring these variables. 
+
+```{r}
+# quality spread
+qual_count <- ames_subdat %>%
+  mutate(qual_bucket = QualBinVar(QualityIndex)) %>%
+  group_by(qual_bucket) %>%
+  arrange(qual_bucket) %>%
+  summarise(count=n()) %>%
+  mutate(percent = count / sum(count))
+
+qual_count2 <- ames_subdat %>%
+  group_by(OverallQual) %>%
+  arrange(OverallQual) %>%
+  summarise(count=n()) %>%
+  mutate(percent = count / sum(count))
+
+# qual plot
+qual_dist <- qual_count %>%
+  ggplot(aes(x=qual_bucket, y=count, fill=qual_bucket)) + 
+  geom_bar(stat="identity") +
+  labs(title="QualityIndex Distribution", x = "", y = "Count of Homes") +
+  geom_text(aes(label=count),vjust = -.5, size = 2.5, fontface = "bold.italic") +
+  geom_text(aes(label=paste(round(percent*100,0),"%",sep="")),position=position_stack(vjust=.5), size = 2.5, fontface = "bold.italic") +
+  theme(text = element_text(size = 10, face = "bold")) + 
+  scale_fill_manual(values=cbPalette) +
+  scale_y_continuous(labels = scales::comma) +
+  # need to title the text unor
+  #theme(axis.text.x=element_text(angle=45,hjust=1)) +
+  guides(fill=FALSE)
+
+qual_dist2 <- qual_count2 %>%
+  ggplot(aes(x=as.factor(OverallQual), y=count, fill=as.factor(OverallQual))) + 
+  geom_bar(stat="identity") +
+  labs(title="OverallQual Distribution", x = "", y = "") +
+  geom_text(aes(label=count),vjust = -.5, size = 2.5, fontface = "bold.italic") +
+  geom_text(aes(label=paste(round(percent*100,0),"%",sep="")),position=position_stack(vjust=.5), size = 2.5, fontface = "bold.italic") +
+  theme(text = element_text(size = 10, face = "bold")) + 
+  scale_fill_manual(values=cbPalette) +
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill=FALSE)
+
+grid.arrange(qual_dist, qual_dist2, ncol = 2, widths=9:10,top=textGrob("Bar Charts of QualityIndex and OverallQual", gp=gpar(fontsize=14, fontface = "bold")), bottom=textGrob("Index", gp=gpar(fontsize=10, fontface = "bold")))
+
+```
+
+In comparing these two bar charts, we can see that there is a more even distribution of homes by OverallQual than by QualityIndex. However, we can validate that the relationship between OverallQual and OverallCond is what we would expect it to be. For instance, most homes have a OverallQual in the 5-8 range, and if their relationship with OverallCond were 1-to-1, then we should have more homes in the 20-49 range. In examining the bar chart of QualityIndex, we do in fact see most homes in this range. 
+
+Simple linear regression models require a continuous predictor variable, so we will need to move forward with QualityIndex, as OverallQual is an ordinal categorical variable. We will seek to understand how SalePrice varies by QualityIndex to determine if it is a good potential predictor for our model.
+
+Now, we will examine the relationships between SalePrice and two other variables: QualityIndex (as a factor) and BedroomAbvGr. 
+
+```{r, boxplot function}
+fun_mean <- function(x){
+  return(data.frame(y=round(mean(x),0), label=round(mean(x,na.rm=T),0)))
+}
+
+boxplot_function <- function(varx,mytitle,xlabel="",ylabel=""){
+  ames_subdat %>%
+    rename_(x=varx) %>%
+    mutate(x=as.factor(x)) %>%
+    ggplot(aes(x=x, y=SalePrice, fill=as.factor(varx))) + 
+    geom_boxplot(outlier.colour =  cbPalette[2], outlier.shape = 5, outlier.size = 2) +
+    labs(title=mytitle, x=xlabel, y=ylabel) +
+    theme(text = element_text(size = 10, face = "bold")) + 
+    scale_y_continuous(labels = scales::dollar) +
+    scale_fill_manual(values = cbPalette) +
+    guides(fill=FALSE) +
+    stat_summary(fun.y = mean, geom="point", colour = "darkred", size = 1) 
+  
+}
+```
+
+
+```{r}
+# boxplots of totalfloorsf & saleprice by our categorical variables
+saleprice_overallqual_boxplot <- boxplot_function("QualityIndexBin","By QualityIndex",ylabel="SalePrice")
+  
+saleprice_bed_boxplot <- boxplot_function("BedroomAbvGr","By BedroomAbvGr")
+
+grid.arrange(saleprice_overallqual_boxplot, saleprice_bed_boxplot, ncol = 2, widths=8:9,top=textGrob("Boxplots of SalePrice by QualityIndex and BedroomAbvGr", gp=gpar(fontsize=14, fontface = "bold")), bottom=textGrob("*Mean values are denoted by the darkred dot", gp=gpar(fontsize=8, fontface = "bold")))
+
+```
+
+From these boxplots, we can readily see that when examining SalePrice by QualityIndex there appears to be minimal overlap between each of our indices and different median values. While there is variation in SalePrice by BedroomAbvGr, we see differences between 0 bedrooms, 1-2 bedrooms, and 3+ bedrooms. We might consider having less categories if BedroomAbvGr were to be included in our model. Furthermore, surprisingly, homes with 0 bedrooms have higher sale prices. There has to be other characteristics that would contribute to this trend, outside of number of bedrooms. The trends by QualityIndex make logical sense: as quality increases, then so does sale price.
+
+Comparing these two boxplots, QualityIndex seems to be the better potential predictor to include in our regression model because of the differences by each of these quality indices or ratings. It is also important to call out that both variables have outliers in each of their categories.
+
+We continue our analysis by exploring the relationships between SalePrice and the following potential continuous predictors: TotalFloorSF, QualityIndex, and HouseAge. From this analysis, we will choose two predictors. We will also incorporate how these relationships vary by OverallQual and BedroomAbvGr, even though categorical variables will not be included in our model.
+
+We begin by examining scatterplots of TotalFloorSF and SalePrice.
+
+```{r, scatterplot function}
+scatterplot_function <- function(varx,vary,pt_color,mytitle,xlabel="",ylabel="",guides_name){
+  ames_subdat %>%
+    rename_(x=varx,y=vary,color=pt_color) %>%
+    mutate(color=as.factor(color)) %>%
+    ggplot(aes(x=x, y=y,color=color)) + 
+    geom_point(shape=1) +
+    labs(title=mytitle, x=xlabel, y=ylabel) +
+    scale_color_manual(values=cbPalette) +
+    theme(text = element_text(size = 10, face = "bold")) + 
+    scale_y_continuous(labels = scales::dollar) +
+    scale_x_continuous(labels = scales::comma) +
+    guides(color=guide_legend(guides_name))
+}
+```
+
+```{r}
+# scatterplots of totalfloorsf & saleprice by our categorical variables
+totalfloor_saleprice_overallqual_plot <- scatterplot_function("TotalFloorSF","SalePrice","OverallQual","By OverallQual",ylabel="SalePrice",guides_name = "Index")
+
+totalfloor_saleprice_bed_plot <- scatterplot_function("TotalFloorSF","SalePrice","BedroomAbvGr","By BedroomAbvGr",guides_name = "Bedrooms")
+
+grid.arrange(totalfloor_saleprice_overallqual_plot, totalfloor_saleprice_bed_plot, ncol = 2, widths=8:9,top=textGrob("Scatterplots of SalePrice and TotalFloorSF", gp=gpar(fontsize=14, fontface = "bold")), bottom=textGrob("TotalFloorSF", gp=gpar(fontsize=10, fontface = "bold")))
+
+```
+
+There are several key points we can make from these two scatterplots.
+
+First, we can better understand the relationship between TotalFloorSF and SalePrice. First, we can examine that there is a positive linear relationship with TotalFloorSF and SalePrice. In fact, the correlation between TotalFloorSF and SalePrice is `r paste(round(cor(ames_subdat$TotalFloorSF, ames_subdat$SalePrice),2)*100,"%",sep="")`, which is very strong. We note that the removal of our extreme outliers has improved this relationship by removing the variability present in the upper ranges of both of these variables, resulting in a higher correlation. The addition of the regression lines to our scatterplots helps to see this pattern.
+
+Although there is a strong positive linear relationship, we gain much more context from viewing these scatterplots. For one, we can see that this relationship follows a wedge-shaped pattern, also known as heteroscedasticity. We can see that there is increased variability in the upper ranges of both SalePrice and TotalFloorSF. This trend means that we will need to transform SalePrice, as heteroscedasticity is a violation of a linear regression model. Additionally, the presence of heteroscedasticity means that TotalFloorSF on its own does not fully describe all of the variability in SalePrice. We would not have obtained this information if we were to solely utilize correlation in determining the 'best' potential predictor.
+
+Second, we can make some observations regarding the interactions with our two categorical variables, OverallQual and BedroomAbvGr. We see clear layering of TotalFloorSF and SalePrice by OverallQual. We still see differences in number of bedrooms, as 4- and 5- bedroom homes are on the right side of the plot.
+
+We repeat the exercise above by examining scatterplots of SalePrice and QualityIndex.
+
+```{r}
+# scatterplots of totalfloorsf & saleprice by our categorical variables
+qual_saleprice_overallqual_plot <- scatterplot_function("QualityIndex","SalePrice","OverallQual","By OverallQual",ylabel="SalePrice",guides_name = "Index")
+  
+qual_saleprice_bed_plot <- scatterplot_function("QualityIndex","SalePrice","BedroomAbvGr","By BedroomAbvGr",guides_name = "Bedrooms")
+
+grid.arrange(qual_saleprice_overallqual_plot, qual_saleprice_bed_plot, ncol = 2, widths=8:9,top=textGrob("Scatterplots of SalePrice and QualityIndex", gp=gpar(fontsize=14, fontface = "bold")), bottom=textGrob("QualityIndex", gp=gpar(fontsize=10, fontface = "bold")))
+
+```
+
+We can see that the relationship between SalePrice and QualityIndex is a positive one. For one, the correlation between these two variables is `r paste(round(cor(ames_subdat$QualityIndex, ames_subdat$SalePrice),2)*100,"%",sep="")`, which is just okay. We can examine that part of why this correlation is just okay is there appears to be increased variability in the 25-50 quality index range. The addition of the regression line helps to demonstrate that the line does not go through the middle of the data cloud.
+
+Furthermore, we can state that we once again see layering by OverallQual. The relationship between QualityIndex and SalePrice does not seem captured by number of bedrooms, as the coloring does not follow a distinct pattern.
+
+Finally, we analyze scatterplots between SalePrice and HouseAge.
+
+```{r}
+# scatterplots of totalfloorsf & saleprice by our categorical variables
+age_saleprice_overallqual_plot <- scatterplot_function("HouseAge","SalePrice","OverallQual","By OverallQual",ylabel="SalePrice",guides_name = "Index")
+
+age_saleprice_bed_plot <- scatterplot_function("HouseAge","SalePrice","BedroomAbvGr","By BedroomAbvGr",guides_name = "Bedrooms")
+
+grid.arrange(age_saleprice_overallqual_plot, age_saleprice_bed_plot, ncol = 2, widths=8:9,top=textGrob("Scatterplots of SalePrice and HouseAge", gp=gpar(fontsize=14, fontface = "bold")), bottom=textGrob("HouseAge", gp=gpar(fontsize=10, fontface = "bold")))
+
+```
+
+From these scatterplots, we can see that HouseAge and SalePrice have a negative relationship. That is, as HouseAge increases then SalePrice decreases. In fact, the correlation between these two variables is `r paste(round(cor(ames_subdat$HouseAge, ames_subdat$SalePrice),2)*100,"%",sep="")`. The correlation is slightly improved since we reduced the scope of our data set.
+
+Moreover, we continue to see the trend of clear layering by OverallQual with some patterns by BedroomAbvGr. The plot on the right shows a higher concentration of blues under the regression line and a higher concentration of pinks and blacks above the regression line.
+
+### Selection of Two Predictors
+From all of our exploratory work, we will move forward with TotalFloorSF and QualityIndex as our two predictors. 
+
+There are several reasons why we select QualityIndex over HouseAge. First, from the boxplot of OverallQual (as a factor) and SalePrice, we saw that SalePrice did vary by OverallQual as the ranges across indices showed distinct ranges of SalePrice. Additionally, seeing the trends by OverallQual in the scatterplots above really showed that SalePrice and TotalFloorSF do vary by quality. From Assignment 1 we saw a stronger linear relationship between TotalFloorSF and QualityIndex. Assignment 1 showed essentially no linear relationship between TotalFloorSF and HouseAge. Even though HouseAge has a slighter higher correlation with SalePrice, we are looking for relationships that make logical sense. 
+
+We can further validate that these relationships make sense by examining a 3D scatterplot of SalePrice, TotalFloorSF, and QualityIndex.
+
+```{r}
+attach(ames_subdat)
+
+s3d <-scatterplot3d(TotalFloorSF,QualityIndex,SalePrice,pch=16, 
+                    highlight.3d=TRUE,type="h", main="3D Scatterplot")
+fit <- lm(SalePrice ~ TotalFloorSF + QualityIndex) 
+s3d$plane3d(fit)
+```
+
+We can see from the 3D scatterplot that higher sale prices are associated with larger square feet and a higher quality index. We are now ready to move forward with our regression models.
+
+## Section 3: Simple Linear Regression Model
+
+In this section, we will create two simple linear regression models from our two predictors of TotalFloorSF and QualityIndex. Commentary is provided on the significance and goodness of fit of each model.
+
+### Model 1: TotalFloorSF
+We start with a linear regression model of TotalFloorSF as the predictor.
+
+First, we answer the question 'Is my model significant?' From the ANOVA results below, we can see that our p-value is low, which implies that our model is significant. However, we need to keep exploring further to assess how good this model actually is, as significance does not always imply that we have a 'good' model.
+
+```{r}
+SLRresult1 <- lm(SalePrice ~ TotalFloorSF, data=ames_subdat)
+summary(aov(SLRresult1))
+SLR_sum1 <- summary(SLRresult1)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum1$coefficients[1],1))` + `r paste(round(SLR_sum1$coefficients[2],1))`x, where x = the number of total square feet.
+
+We interpret our model as for each additional 1 square foot, the average sale price of a home increases by `r paste(round(SLR_sum1$coefficients[2],1))` dollars.
+
+```{r}
+SLR_sum1$coefficients
+```
+
+We can also examine the residual standard error and R squared value to understand goodness of fit.
+
+The residual standard error is `r paste(round(SLR_sum1$sigma,0))` dollars. This means that the average error for one standard deviation is `r paste(round(SLR_sum1$sigma,0))`, which is a pretty large range. The R squared value is `r paste(round(SLR_sum1$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum1$r.squared,2)*100,"%",sep="")` of SalePrice variation is explained by TotalFloorSF. Since we want our R squared value to be close to one, this result is okay but possibly could be better.
+
+We now examine two key residual plots to determine if our assumptions of constant variance and normality hold true for this simple linear regression model.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult1, which=1:2, col=cbPalette[6]) # we select only the first 2 plots
+```
+
+Right away, we can see that our residuals have a pattern and are not randomly scattered above and below the line. Therefore, the assumption of constant variance is not met. Moreover, the residuals do not follow the normal QQ-line in the tails so we also do not meet the assumption of normality.
+
+Overall, the simple linear regression model with TotalFloorSF does not meet two key assumptions for modeling: constant variance and normality, despite being a significant predictor for SalePrice. The R squared value and residual error are just okay as well, resulting in wider than desired confidence intervals for predicted SalePrice values. 
+
+### Model 2: QualityIndex
+
+We now turn our attention to a simple linear regression model with QualityIndex as the predictor. We will examine the significance and fit of this model in predicting SalePrice.
+
+Starting with significance, from the ANOVA results below, we can see that our p-value is low, which tells us that our model is significant. 
+
+```{r}
+SLRresult2 <- lm(SalePrice ~ QualityIndex, data=ames_subdat)
+summary(aov(SLRresult2))
+SLR_sum2 <- summary(SLRresult2)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum2$coefficients[1],1))` + `r paste(round(SLR_sum2$coefficients[2],1))`x, where x = the number of quality index.
+
+We interpret our model as for each additional increase in quality index, the average sale price of a home increases by `r paste(round(SLR_sum2$coefficients[2],1))` dollars.
+
+```{r}
+SLR_sum2$coefficients
+```
+
+Next, we examine the residual standard error and R squared value to see how good our model actually is.
+
+The residual standard error is `r paste(round(SLR_sum2$sigma,0))` dollars. This means that the average error for one standard deviation is `r paste(round(SLR_sum2$sigma,0))`, which is a large range. The R squared value is `r paste(round(SLR_sum2$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum2$r.squared,2)*100,"%",sep="")` of SalePrice variation is explained by QualityIndex, which is a very low amount of variation. This result is not desirable.
+
+We continue our goodness of fit assessment by analyzing two key residual plots to determine if our assumptions of constant variance and normality hold true for this simple linear regression model.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult2, which=1:2, col=cbPalette[6])
+```
+
+Similar to our first simple linear regression model, we can see that our residuals do not meet the assumptions of constant variance and normality. The residuals are not randomly distributed, since they follow a wedge-shaped pattern and demonstrate banding. Especially on the right tail, the residuals depart from the QQ-line.
+
+Overall, our simple linear regression model with QualityIndex as a predictor does not meet our assumptions of constant variance and normality. More importantly, even though this model is significant, it has poor goodness of fit metrics, making this model a poor choice, on its own, for predicting SalePrice.
+
+## Section 4: Multiple Linear Regression Model (Model 3)
+
+We will now examine the significance and goodness and fit of a multiple linear regression model, which includes TotalFloorSF and QualityIndex as predictors.
+
+From the ANOVA results below, we can see that our p-value is low, which implies that our model is significant.
+
+```{r}
+SLRresult3 = lm(SalePrice ~ TotalFloorSF + QualityIndex, data=ames_subdat)
+summary(aov(SLRresult3))
+SLR_sum3 = summary(SLRresult3)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum3$coefficients[1],1))` + `r paste(round(SLR_sum3$coefficients[2],1))`x1 + `r paste(round(SLR_sum3$coefficients[3],1))`x2, where x1 = the number of total square feet and x2 = the number of quality index.
+
+We interpret our model as for each additional 1 square foot, the average sale price of a home increases by `r paste(round(SLR_sum3$coefficients[2],1))` dollars when quality index is held constant. Similarly, for each additional increase in quality index, the average sale price of a home increases by `r paste(round(SLR_sum3$coefficients[3],1))` dollars when total square feet is held constant.
+
+```{r}
+SLR_sum3$coefficients
+```
+
+We can also examine the residual standard error and R squared value to assess the goodness of fit of this multiple linear regression model.
+
+The residual standard error is `r paste(round(SLR_sum3$sigma,0))` dollars. This means that the average error for one standard deviation is `r paste(round(SLR_sum3$sigma,0))`, which is a much narrower range than each of our simple linear regression models. The R squared value is `r paste(round(SLR_sum3$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum3$r.squared,2)*100,"%",sep="")` of SalePrice variation is explained by TotalFloorSF and QualityIndex. This R squared value is fairly good, as we want our R squared value close to 1. 
+
+We now examine two key residual plots to determine if our assumptions of constant variance and normality hold true for this model.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult3, which=1:2, col=cbPalette[6])
+```
+
+We see that our multiple linear regression model does not meet the assumptions of constant variance and normality. The plot of residuals vs fitted values follows a wedge-shaped pattern. The QQ-plot shows the residuals depart from the QQ-line in the tails, especially the right tail.
+
+In summary, the multiple linear regression model is significant and improves on goodness of fit metrics compared to the simple linear regression models. However, there are still concerns as this model violates the core assumptions of linear regression.
+
+## Section 5: LogSalePrice Response Models
+
+In this section, we re-evaluate our three models using logSalePrice instead of SalePrice as our response variable. We perform this step to consider this transformed variable, as based on our EDA work we saw patterns of heteroscedasticity. 
+
+It is important to call out that the log transformation of SalePrice improves its skewness. Before the transformation, it was `r paste(round(skewness(ames_subdat$SalePrice),2))` and after the log transformation, it is `r paste(round(skewness(ames_subdat$logSalePrice),2))`. Given the packages used in this assignment, we want the skewness and kurtosis values to be 0. However, the kurtosis value is not improved. It was `r paste(round(kurtosis(ames_subdat$SalePrice),2))` before the transformation and is `r paste(round(kurtosis(ames_subdat$logSalePrice),2))` after the log transformation. This means that we are dealing with a heavy tailed distribution, which provides some context to the results that will be shown below.
+
+For each model shown, we provide commentary on model significance and goodness of fit. We will also draw comparisons to the equivalent models where SalePrice was the response variable.
+
+### Model 4: Simple Linear Regression - TotalFloorSF
+
+We start with examining model significance. From the ANOVA results below, we can see that our p-value is low, which tells us that our model is significant. 
+
+```{r}
+SLRresult4 <- lm(logSalePrice ~ TotalFloorSF, data=ames_subdat)
+summary(aov(SLRresult4))
+SLR_sum4 <- summary(SLRresult4)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum4$coefficients[1],3))` + `r paste(round(SLR_sum4$coefficients[2],3))`x, where x = the number of total square feet.
+
+We interpret our model as each additional 1 square foot results in a `r paste(round(SLR_sum4$coefficients[2]*100,3),"%",sep="")` percentage change in the sale price of a home.
+
+```{r}
+SLR_sum4$coefficients
+```
+
+We can also examine the residual standard error and R squared value to evaluate goodness of fit.
+
+The residual standard error is `r paste(round(SLR_sum4$sigma,0))`. This means that the average error for one standard deviation is `r paste(round(SLR_sum4$sigma,0))`, which does not reveal a lot of meaningful information as the log transformation of SalePrice is resulting in this narrower range. The R squared value is `r paste(round(SLR_sum4$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum4$r.squared,2)*100,"%",sep="")` of logSalePrice variation is explained by TotalFloorSF. 
+
+This result is equivalent to Model 1. If we compare the adjusted R squared values, Model 1 with SalePrice has an adjusted R squared value of `r paste(round(SLR_sum1$adj.r.squared,2)*100,"%",sep="")` and Model 4 with logSalePrice has an adjusted R squared value of `r paste(round(SLR_sum1$adj.r.squared,2)*100,"%",sep="")`.
+
+We now examine two key residual plots to determine if our assumptions of constant variance and normality hold true for this simple linear regression model.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult4, which=1:2, col=cbPalette[6])
+```
+
+We can see improvement in the assumptions of constant variance and normality with logSalePrice. The plot of residuals vs fitted values is more random and the residuals more closely follow the QQ-line. The residuals do however depart from the QQ-line in the lower tail now.
+
+Although not perfect, Model 4 with logSalePrice as the response variable and TotalFloorSF has a much better model fit than Model 1.
+
+### Model 5: Simple Linear Regression - QualityIndex
+
+From the ANOVA results below, we can see that our p-value is low, which tells us that our model is significant. Next, we interpret this model.
+
+```{r}
+SLRresult5 <- lm(logSalePrice ~ QualityIndex, data=ames_subdat)
+summary(aov(SLRresult5))
+SLR_sum5 <- summary(SLRresult5)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum5$coefficients[1],3))` + `r paste(round(SLR_sum5$coefficients[2],3))`x, where x = the number of quality index.
+
+We interpret our model as each additional increase in quality index results in a `r paste(round(SLR_sum5$coefficients[2]*100,3),"%",sep="")` percentage change in the sale price of a home.
+
+```{r}
+SLR_sum5$coefficients
+```
+
+We can also examine the residual standard error and R squared value for goodness of fit.
+
+The residual standard error is `r paste(round(SLR_sum5$sigma,0))`. This means that the average error for one standard deviation is `r paste(round(SLR_sum5$sigma,0))`, which once again has been impacted by the log transformation of SalePrice. The R squared value is `r paste(round(SLR_sum5$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum5$r.squared,2)*100,"%",sep="")` of logSalePrice variation is explained by QualityIndex. Since we want our R squared value to be close to one, this result is okay but possibly could be better.
+
+This result is slightly better than Model 2. If we compare the adjusted R squared values, Model 2 with SalePrice has an adjusted R squared value of `r paste(round(SLR_sum2$adj.r.squared,2)*100,"%",sep="")` and Model 4 with logSalePrice has an adjusted R squared value of `r paste(round(SLR_sum5$adj.r.squared,2)*100,"%",sep="")`. However, both R squared values are sub par.
+
+We now examine two key residual plots to determine if our assumptions of constant variance and normality hold true for this simple linear regression model.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult5, which=1:2, col=cbPalette[6])
+```
+
+Similar to Model 4, the assumptions of constant variance and normality are improved using logSalePrice. However, we can see some outlier values that are potentially driving departures from our normal lines. There is variation in the residual vs fitted values plot in the lower values and a departure of the residuals from the QQ-line in both tails.
+
+In short, Model 5 has a low R squared value but using logSalePrice improves upon this model meeting linear model assumptions.
+
+### Model 6: Multiple Linear Regression - TotalFloorSF and QualityIndex
+
+Now we will combine our two predictors to form a multiple linear regression model.
+
+We once again begin with determining model significance. We can see that our p-value is low, which implies that our model is significant. 
+
+```{r}
+SLRresult6 <- lm(logSalePrice ~ TotalFloorSF + QualityIndex, data=ames_subdat)
+summary(aov(SLRresult6))
+SLR_sum6 <- summary(SLRresult6)
+```
+
+From the output of the coefficients below, we are able to write our model as: y = `r paste(round(SLR_sum6$coefficients[1],3))` + `r paste(round(SLR_sum6$coefficients[2],3))`x1 + `r paste(round(SLR_sum6$coefficients[3],3))`x2, where x1 = the number of total square feet and x2 = the number of quality index.
+
+We interpret our model as each additional 1 square foot results in a `r paste(round(SLR_sum6$coefficients[2]*100,3),"%",sep="")` percentage change in the sale price of a home when quality index is held constant. This slight difference from the coefficient above is due to rounding and multiplication. Similarly, each additional increase in quality index results in a `r paste(round(SLR_sum6$coefficients[3]*100,3),"%",sep="")` percentage change in the sale price of a home when total square feet is held constant.
+
+```{r}
+SLR_sum6$coefficients
+```
+
+Next, we examine the residual standard error and R squared value to assess goodness of fit.
+
+The residual standard error is `r paste(round(SLR_sum6$sigma,0))`. This means that the average error for one standard deviation is `r paste(round(SLR_sum6$sigma,0))`, which is does not reveal too much information as the transformation of SalePrice is impacting this range. The R squared value is `r paste(round(SLR_sum6$r.squared,2)*100,"%",sep="")`, which means that `r paste(round(SLR_sum6$r.squared,2)*100,"%",sep="")` of logSalePrice variation is explained by TotalFloorSF and QualityIndex. Since we want our R squared value to be close to one, this result is good.
+
+This result is slightly better than Model 3. If we compare the adjusted R squared values, Model 3 with SalePrice has an adjusted R squared value of `r paste(round(SLR_sum3$adj.r.squared,2)*100,"%",sep="")` and Model 6 with logSalePrice has an adjusted R squared value of `r paste(round(SLR_sum6$adj.r.squared,2)*100,"%",sep="")`. Both adjusted R squared values indicate that the models are good, but examining the residual plots to determine if our assumptions of constant variance and normality hold true will be key to see which model actually performs better.
+
+```{r}
+par(mfrow=c(1,2)) 
+plot(SLRresult6, which=1:2, col=cbPalette[6])
+```
+
+Similar to the trends above, we can see that the residual plots are much improved using logSalePrice. The residuals vs fitted values have a more constant variance, despite showing some variability in the left of the plot. Additionally, the residuals follow the normal QQ-line except in the lower left tail. 
+
+All in all, we can conclude that this model has a better fit than Model 4.
+
+# Summary and Conclusions
+
+In this assignment, we utilized a subset of the Ames dataset to explore and identify two promising predictor variables to utilize in various linear regression models.
+
+From our exploratory data analysis work, we defined typical Ames houses as single family homes that have a total square feet < 3600 and a sale price < 465500. While this definition resulted in the removal of 536 homes from our data set, it did help to also remove inherent variability by building type. Our exploration led us to focus in on TotalFloorSF and QualityIndex as our two predictors for modeling.
+
+Overall, we saw that multiple linear regression models outperformed our simple linear regression models. Furthermore, we saw that models with logSalePrice instead of SalePrice had better conformity to the linear regression assumptions of constant variance and normality.
+
+Even though we were able to successfully create a model (Model 6) that explained a large portion of variability in logSalePrice and largely met linear regression assumptions, there are still several issues with this model that are beyond the scope of this assignment.
+
+First, no conclusions can be made on if Model 6 is truly the 'best' model. No comparisons were made across models as only comparisons were made on if the predictors were in the model were each significant. Because this level of hypothesis testing was not performed, conclusions cannot be drawn on the best predictors of SalePrice. In addition, Model 6 only had a R squared value `r paste(round(SLR_sum6$r.squared,2)*100,"%",sep="")`. Ideally, we would like to find a model that has a higher R squared value.
+
+Second, in examining the residual plots, there are some concerns. Although we saw that the logSalePrice model residuals conformed more closely to the assumptions of constant variance and normality, there appear to be some outliers or influential points that are preventing these models from fully meeting these assumptions. These outliers would have to be understood better and possibly removed before additional conclusions could be drawn. We also saw that logSalePrice kurtosis value alluded to a heavy tailed distribution but the skewness value was close to 0. This result is concerning, especially when trying to model sale price behavior.
+
+Furthermore, the multiple linear regression models do not include any categorical variables. The Ames data set is primarily comprised of categorical variables. From Assignment 2, we saw some trends by OverallQual and BedroomAbvGr and in assignment 1 we saw that SalePrice varied by Neighborhood. Not including any categorical variables in a regression model or at least comparing models with and without categorical variables is a needed step. Without this level of analysis, we are not incorporating any contextual information that could potentially improve the fit of our model.
+
+All in all, this assignment makes some good progress on determining potential predictors of SalePrice. However, it falls short as there are outliers that still need to be addressed and further model comparisons that need to be made before the appropriate model can be selected to predict sale price.

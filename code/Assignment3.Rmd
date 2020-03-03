@@ -1,0 +1,728 @@
+---
+title: "Julia Rodd Assignment 3"
+output: 
+  pdf_document:
+      latex_engine: xelatex
+      toc: true
+      toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE)
+options(scipen = 999)
+library(tidyverse)
+library(rmarkdown)
+library(forcats)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(reshape)
+library(rockchalk)
+library(car)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/jrodd-msds-projects/410_Regression/code")
+
+# global variable - used in plotting
+good_neighborhoods <- c("BrkSide", "ClearCr", "CollagCr","Crawfor", "Edwards", "SawyerW", "SWISU", "Veenker")
+```
+
+# Introduction
+
+This assignment utilizes housing data from Ames, IA from 2006 - 2010 and expands upon the analyses in Assignments 1 and 2. The overall goal of this assignment is to define and incorporate categorical variables into a regression model and compare the fits of several types of models using various goodness of fits metrics and techniques. Some consideration is given to identifying and removing influential points. Ultimately, simple and multiple linear regression models are created and commentary is provided on their model interpretation and goodness of fit. The R ggplot and dplyr packages are the two primary packages used in this assignment.
+
+# Results
+
+Before we get started, it is worth noting that for this assignment we utilize the same drop conditions defined in Assignment 2.
+
+That is, we will fit various models for typical Ames houses.
+
+Typical Ames houses are defined as:
+
+1. A single family home (BldgType == "1Fam");
+2. Houses with a total square feet < 3,600 (TotalFloorSF < 3600); and,
+3. Houses a sale price < 465,500 (SalePrice < 465500)
+
+In defining our data this way, we remove 536 homes from our data set and are left with 2394 homes for modeling. The rationale in limiting our scope of observations is to improve model performance by removing variability.
+
+
+```{r}
+# read in our data
+ames <- read.csv(file="../data/ames_housing_data.csv",head=TRUE,sep=",")
+
+# define additional variables
+ames <- ames %>%
+  mutate(TotalFloorSF = FirstFlrSF + SecondFlrSF,
+         HouseAge = YrSold - YearBuilt,
+         QualityIndex = OverallQual * OverallCond,
+         logSalePrice = log(SalePrice),
+         PriceSqFt = SalePrice/TotalFloorSF)
+
+# define our subset
+ames_subdat <- ames %>%
+  mutate(price_sqft = SalePrice/TotalFloorSF) %>%
+  select(TotalFloorSF, HouseAge, QualityIndex, PriceSqFt, SalePrice, LotArea, BsmtFinSF1, Neighborhood, HouseStyle, LotShape, OverallQual, logSalePrice, TotalBsmtSF, HouseStyle, BldgType, KitchenAbvGr, KitchenQual, FullBath, BedroomAbvGr, price_sqft) %>%
+  filter(BldgType == "1Fam" & TotalFloorSF < 3600 & SalePrice < 465500)
+
+```
+
+## Section 1
+
+In this section, we perform some analysis using the BedroomAbvGr variable. For this analysis, we will be treating BedroomAbvGr as a factor (categorical) variable.
+
+We begin by analyzing its spread and report the mean SalePrice for each category in the below visual.
+
+```{r}
+# used by stat_summary
+fun_mean <- function(x){
+  return(data.frame(y=round(mean(x),0), label=round(mean(x,na.rm=T),0)))
+}
+
+saleprice_bed_boxplot <- ames_subdat %>%
+  ggplot(aes(x=as.factor(BedroomAbvGr), y=SalePrice, fill=as.factor(BedroomAbvGr))) + 
+  geom_boxplot(outlier.colour =  cbPalette[2], outlier.shape = 5, outlier.size = 2) +
+  labs(title="SalePrice By BedroomAbvGr", x = "Number of Bedrooms", y = "SalePrice") +
+  theme(text = element_text(size = 10, face = "bold")) + 
+  scale_y_continuous(labels = scales::dollar) +
+  scale_fill_manual(values = cbPalette) +
+  guides(fill=FALSE) +
+  stat_summary(fun.y = mean, geom="point", colour = "darkred", size = 1) +
+  stat_summary(fun.data = fun_mean, geom = "text", size = 3, vjust = -.7)
+
+grid.arrange(saleprice_bed_boxplot, ncol = 1)
+
+```
+
+We can see that the mean sale prices go up and down based on the number of bedrooms. This pattern is very interesting, as we would expect the sale price to increase as number of bedrooms increase. Since the means are not constant across each category in BedroomAbvGr, this makes BedroomAbvGr a worthwhile variable to explore further.
+
+We now create a simple linear regression model using BedroomAbvGr as the predictor for SalePrice. 
+
+```{r}
+bed_model1 <- lm(SalePrice ~ as.factor(BedroomAbvGr), data=ames_subdat)
+anova(bed_model1)
+bed_model1_sum <- summary(bed_model1)
+```
+
+We can quickly validate from the ANOVA results that our model is significant.
+
+```{r}
+bed_model1_sum$coefficients
+```
+
+In interpreting the model, we can see that R has chosen BedroomAbvGr = 0 (0 bedrooms) as the baseline cateogry. We did not create dummy variables to alter this interpretation.
+
+In calculating the average SalePrice for each category in BedroomAbvGr, we can see that the values are the mean SalePrices from the boxplot above. The interpretation of these coefficients is provided below:
+
+* 0 bedrooms: has a mean SalePrice of `r paste(round(bed_model1_sum$coefficients[1],0))` dollars (the intercept)
+* 1 bedroom: has a mean SalePrice that is `r paste(round(bed_model1_sum$coefficients[2],0))` dollars lower than homes with 0 bedrooms (mean = `r paste(round(bed_model1_sum$coefficients[1] + bed_model1_sum$coefficients[2],0))`)
+* 2 bedrooms: has a mean SalePrice that is `r paste(round(bed_model1_sum$coefficients[3],0))` dollars lower than homes with 0 bedrooms (mean = `r paste(round(bed_model1_sum$coefficients[1] + bed_model1_sum$coefficients[3],0))`)
+* 3 bedrooms: has a mean SalePrice that is  `r paste(round(bed_model1_sum$coefficients[4],0))` dollars lower than homes with 0 bedrooms (mean = `r paste(round(bed_model1_sum$coefficients[1] + bed_model1_sum$coefficients[4],0))`)
+* 4 bedrooms: has a mean SalePrice that is `r paste(round(bed_model1_sum$coefficients[5],0))` dollars lower than homes with 0 bedrooms (mean = `r paste(round(bed_model1_sum$coefficients[1] + bed_model1_sum$coefficients[5],0))`)
+* 5 bedrooms: has a mean SalePrice that is `r paste(round(bed_model1_sum$coefficients[6],0))` dollars lower than homes with 0 bedrooms (mean = `r paste(round(bed_model1_sum$coefficients[1] + bed_model1_sum$coefficients[6],0))`)
+
+Next, we examine a plot of the residuals versus our predictor, BedroomAbvGr.
+
+```{r,function for residuals vs predictor}
+residuals_predictor_function <- function(model,varx,title){
+  ames_subdat$pred <- predict(model,ames_subdat)
+  
+  ames_subdat <- ames_subdat %>%
+  mutate(res = SalePrice - pred, 
+         absres = abs(res))
+  
+  # then we calculate mean absolute error
+  MAE <- mean(ames_subdat$absres)
+
+  if(varx=="Neighborhood"){
+    ames_subdat %>%
+      rename_(x=varx) %>%
+      mutate(x = ifelse(x %in% good_neighborhoods, paste0("*",x,sep=""), as.character(x))) %>%
+      ggplot(aes(x=x, y=res)) + 
+      geom_point(color=cbPalette[6], size=2) +
+      labs(title=title,y="Residuals",x=varx) +
+      theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) + 
+      theme(axis.text.x=element_text(angle=45,hjust=1))
+  } else {
+    ames_subdat %>%
+      rename_(x=varx) %>%
+      ggplot(aes(x=x, y=res)) + 
+      geom_point(color=cbPalette[6], size=2) +
+      labs(title=title,y="Residuals",x=varx) +
+      theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) + 
+      geom_smooth(method=lm,se=FALSE, color=cbPalette[2]) 
+  }
+}
+
+```
+
+```{r,mae function}
+mae_function <- function(model){
+  ames_subdat$pred <- predict(model,ames_subdat)
+  
+  ames_subdat <- ames_subdat %>%
+    mutate(res = SalePrice - pred, 
+           absres = abs(res))
+  
+  # then we calculate mean absolute error
+  MAE <- mean(ames_subdat$absres)
+  
+  return(MAE)
+}
+```
+
+
+```{r}
+residuals_predictor_function(bed_model1, "BedroomAbvGr","Scatterplot of Residuals vs BedroomAbvGr")
+```
+
+From this plot of residuals vs BedroomAbvGr, we can see a slight pattern. We notice that the 0 line does not go through the average of each bedroom. If we were to create a line that goes through the average of each bar (representing the residuals for each number of bedrooms) then we would not get a completely straight line. This information tells us that our linearity assumption is violated.
+
+Additionally, we can calculate the mean absolute error from this model, which is `r round(mae_function(bed_model1),0)`. The mean error is quite large, which indicates that the fit of this model could be improved.
+
+## Section 2
+
+In this section, we explicitly define dummy variables for BedroomAbvGr and use these new variables to fit a model predicting SalePrice.
+
+We will use homes with 5 bedrooms as our baseline category.
+
+```{r}
+# we define our dummy variables
+# not worth creating a function to do this
+ames_subdat$bed0 <- ifelse(ames_subdat$BedroomAbvGr == 0, 1, 0)
+ames_subdat$bed1 <- ifelse(ames_subdat$BedroomAbvGr == 1, 1, 0)
+ames_subdat$bed2 <- ifelse(ames_subdat$BedroomAbvGr == 2, 1, 0)
+ames_subdat$bed3 <- ifelse(ames_subdat$BedroomAbvGr == 3, 1, 0)
+ames_subdat$bed4 <- ifelse(ames_subdat$BedroomAbvGr == 4, 1, 0)
+
+bed_model2 <- lm(SalePrice ~ bed0 + bed1 + bed2 + bed3 + bed4, data=ames_subdat)
+bed_model2_sum <- summary(bed_model2)
+```
+
+
+```{r}
+bed_model2_sum$coefficients
+```
+
+In interpreting the model, we can see that our coefficients have changed from above with 5 bedrooms as the baseline. 
+
+In calculating the average SalePrice for each category in BedroomAbvGr, we can see that the values are the mean SalePrices from the boxplot above. The interpretation of these coefficients is provided below:
+
+* 5 bedrooms: has a mean SalePrice of `r paste(round(bed_model2_sum$coefficients[1],0))` dollars (the intercept)
+* 4 bedrooms: has a mean SalePrice that is `r paste(round(bed_model2_sum$coefficients[2],0))` dollars higher than homes with 5 bedrooms (mean = `r paste(round(bed_model2_sum$coefficients[2] + bed_model2_sum$coefficients[1],0))`)
+* 3 bedrooms: has a mean SalePrice that is `r paste(round(bed_model2_sum$coefficients[3],0))` dollars lower than homes with 5 bedrooms (mean = `r paste(round(bed_model2_sum$coefficients[1] + bed_model2_sum$coefficients[3],0))`)
+* 2 bedrooms: has a mean SalePrice that is  `r paste(round(bed_model2_sum$coefficients[4],0))` dollars lower than homes with 5 bedrooms (mean = `r paste(round(bed_model2_sum$coefficients[1] + bed_model2_sum$coefficients[4],0))`)
+* 1 bedroom: has a mean SalePrice that is `r paste(round(bed_model2_sum$coefficients[5],0))` dollars lower than homes with 5 bedrooms (mean = `r paste(round(bed_model2_sum$coefficients[1] + bed_model2_sum$coefficients[5],0))`)
+* 0 bedrooms: has a mean SalePrice that is `r paste(round(bed_model2_sum$coefficients[6],0))` dollars higher than homes with 5 bedrooms (mean = `r paste(round(bed_model2_sum$coefficients[1] + bed_model2_sum$coefficients[6],0))`)
+
+We can see that while the coefficients remained the same, defining our own dummy variables altered the interpretation of the model. We were able to utilize a different baseline category and have control over the model interpretation. Similar to above, we can see that the predicted model goes through the mean of each bedroom category. Interpreting the coefficients helps to demonstrate this point.
+
+Furthermore, we can add our newly defined dummy variables into a regression model with TotalFloorSF. We will perform this exercise to demonstrate how to interpret a model with both continuous and categorical variables. Since we are using our dummy variables instead of BedroomAbvGr, 5 bedrooms becoms our baseline category.
+
+```{r}
+bed_model3 <- lm(SalePrice ~ TotalFloorSF + bed0 + bed1 + bed2 + bed3 + bed4, data=ames_subdat)
+anova(bed_model3)
+bed_model3_sum <- summary(bed_model3)
+```
+
+We can see that in this multiple linear regression model, all coefficients are significant.
+
+Below is the output of the coefficients. We will use this information to interpret our model.
+
+```{r}
+bed_model3_sum$coefficients
+```
+
+* 5 bedrooms: for each additional increase in 1 square foot, the average SalePrice increases by `r paste(round(bed_model3_sum$coefficients[1],0))` dollars
+* 4 bedrooms: has a mean SalePrice that is `r paste(round(bed_model3_sum$coefficients[2],0))` dollars higher than homes with 5 bedrooms when TotalFloorSF is held constant
+* 3 bedrooms: has a mean SalePrice that is `r paste(round(bed_model3_sum$coefficients[3],0))` dollars higher than homes with 5 bedrooms when TotalFloorSF is held constant
+* 2 bedrooms: has a mean SalePrice that is  `r paste(round(bed_model3_sum$coefficients[4],0))` dollars higher than homes with 5 bedrooms when TotalFloorSF is held constant
+* 1 bedroom: has a mean SalePrice that is `r paste(round(bed_model3_sum$coefficients[5],0))` dollars higher than homes with 5 bedrooms when TotalFloorSF is held constant
+* 0 bedrooms: has a mean SalePrice that is `r paste(round(bed_model3_sum$coefficients[6],0))` dollars higher than homes with 5 bedrooms when TotalFloorSF is held constant
+
+```{r}
+residuals_predictor_function(bed_model3, "BedroomAbvGr","Scatterplot of Residuals vs BedroomAbvGr")
+```
+
+In comparing the first model with just BedroomAbvGr to now the multiple linear regression model with TotalFloorSF and BedroomAbvGr dummy variables, we can see that the residuals now go through the middle or average of the residuals for each bedroom.
+
+Moerover, our mean absolute error is much improved. In this model, it is `r round(mae_function(bed_model3),0)`. 
+
+Overall, we can see that adding a continuous variable has improved the fit of our model and enables us to meet the linearity assumption.
+
+## Section 3
+
+In this section, we perform hypothesis testing on each of the coefficients in our regression model with BedroomAbvGr (dummy variables) as the sole predictor.
+
+The hypothesis tests can be written as follows. We will perform an hypothesis testing on each coefficient to determine if it is significant or not. Therefore, the t test will be used.
+
+bed0
+
+* H0: bed0 = 0
+* H1: bed0 is not equal to 0
+
+bed1
+
+* H0: bed1 = 0
+* H1: bed1 is not equal to 0
+
+bed2
+
+* H0: bed2 = 0
+* H1: bed2 is not equal to 0
+
+bed3
+
+* H0: bed3 = 0
+* H1: bed3 is not equal to 0
+
+bed4
+
+* H0: bed4 = 0
+* H1: bed4 is not equal to 0
+
+Below is the output from our regression model. We will use this information to interpret the significance of our coefficients.
+
+```{r}
+bed_model2 <- lm(SalePrice ~ bed0 + bed1 + bed2 + bed3 + bed4, data=ames_subdat)
+summary(bed_model2)
+```
+
+We can see that bed1 and bed2 are significant predictors at the .05 level, since they have higher t-values and lower p-values. Therefore, we reject the null hypotheses for bed1 and bed2 and conclude that they are different than 0. However, bed0, bed3, and bed4 are not significant at the .05 level so we fail to reject the null hypothesis for each of these predictors. It is worth noting that bed0 and bed3 may be considered significant at the .10 level. For bed4, with such a high p-value, we fail to reject the null hypothesis and conclude that bed4 is not different than 0.
+
+A potential next step might be to perform partial hypothesis testing to compare a reduced model just with bed1 and bed2 to this full model with all bedroom types, but that exercise is beyond the scope of the assignment. 
+
+## Section 4
+
+In this section, we will create a multiple linear regression model using the predictors of TotalFloorSF and HouseAge. We choose TotalFloorSF, since we know it has a strong positive linear relationship with SalePrice. We choose HouseAge, since it has a fairly strong negative linear relationship with SalePrice. In addition, we have not incorporated HouseAge into a regression model in any assignment thus far and are curious to see how it performs.
+
+### Model 1: TotalFloorSF and HouseAge
+
+From the ANOVA results below, we can see that this model is significant. 
+
+```{r}
+MLR1 <- lm(SalePrice ~ TotalFloorSF + HouseAge, data=ames_subdat)
+summary(aov(MLR1))
+MLR1_sum <- summary(MLR1)
+```
+
+We will now examine some metrics to assess goodness of fit.
+
+We can see that for Model 1 our R squared value is: `r paste(round(MLR1_sum$r.squared*100,1),"%",sep="")`. In contrast, the R squared value for our simple linear regression model with BedroomAbvGr as the predictor is: `r paste(round(bed_model1_sum$r.squared*100,1),"%",sep="")`. As another data point, we can see that adding TotalFloorSF to the BedroomAbvGr model increased the R squared value to: `r paste(round(bed_model3_sum$r.squared*100,1),"%",sep="")`. Therefore, as more predictors are added to a model, the R squared value increases.
+
+However, R squared is not a metric to be used when comparing models. R squared tells us how well a given model explains the variability of our response variable, but adjusted R squared takes into account the number of variables used in a model since adding more variables to a model is not always advantageous. Adjusted R squared can be used to compare models against one another.
+
+For instance, the adjusted R squared for Model 1 is: `r paste(round(MLR1_sum$adj.r.squared*100,1),"%",sep="")`, while the adjusted R squared for our simple linear regression model is: `r paste(round(bed_model1_sum$adj.r.squared*100,1),"%",sep="")`. Moreover, the adjusted R squared for the model with BedroomAbvGr and TotalFloorSF is: `r paste(round(bed_model3_sum$adj.r.squared*100,1),"%",sep="")`. From the adjusted R squared value, Model 1 is the superior model. Further exploration is needed however to determine how well Model 1 meets our linear regression assumptions.
+
+We will begin by examining diagnostic plots of our residuals.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(MLR1, col=cbPalette[6])
+```
+
+We gain a lot of valuable information about the behavior of this model by examining the residuals.
+
+First, we can see that the residuals vs fitted values demostrate a pattern. They have a slight funnel shape, which is indiciative of heteroscedasticity. A transformation of the response variable would alleviate this behavior. Also, we can see that the red line is not straight and has a slight U-shape, which tells us that a linear model is not an appropriate fit here.
+
+In examining the normal QQ-plot, we can see that the residuals do not fall perfectly on the line. We see a departure from the normal line especially in the right tail. Therefore, our normality assumption is violated. We can also see some outliers (numbered points) in the right tail. 
+
+The standardized residuals vs fitted values echo the conclusions drawn from the residuals vs fitted values plot. We can see increasing variation and a non straight red line, which tells us that this linear model is not an appropriate fit and constant variance is not met.
+
+Lastly, from the residuals vs leverage plot, we can see that we have outliers in the x direction and some outliers in the y direction. The worst possible case would be outliers in both the x- and y- direction, which we do not have. Utilizing our drop conditions may have helped to remove some potential influential points. Further study of these outliers is needed to determine if they should be included in the model or not.
+
+We now examine an influence plot of this multiple linear regression model.
+
+```{r}
+influencePlot(MLR1,	id.method="identify", main="Influence Plot", 
+              sub="Circle size is proportial to Cook's Distance", col=cbPalette[6])
+
+```
+
+This plot presents a slightly different perspective to the residuals vs leverage plot shown above. Here, the circles are proportional to Cook's distance. We see that there are several larger circles, which means that these points have higher hat values and are thus influential points (e.g., circle near .005 on the x-axis, circle near (.08,2)). There are statistical methods to identify and aid in the removal of these points, but we will not go into that detail right now.
+
+Finally, multicollinearity is an issue that should be evaluated as part of model adequacy checking process. We can assess this by calculating the Variance Inflation Factor (VIF). For Model 1, the VIF is `r vif(MLR1)`. We want the VIF to be close to 1, which means our predictors are not correlated. In this case, since our VIF is just above 1, we do not have multicollinearity issues to address.
+
+Overall, this multiple linear regression model does not fit the data well, since it violates several linear model assumptions. It is important to note that when assessing goodness of fit, both metrics, such as R squared, adjusted R squared, residual standard error, VIF, and graphical displays of residuals are needed to derive appropriate conclusions. When comparing a reduced model, such a simple linear regression model, to a multiple linear regression model, the model with more predictors has a higher R squared value. Goodness of fit is not just about if the model at hand explains variability in the response variable: it is also about validating that the model meets core assumptions of linearity, normality, and constant variance. If these assumptions were not validated, then inappropriate conclusions would be drawn. Goodness of fit is also a step to help identify any outliers, influential points, and multicollinearity that could be negatively impacting model fit/performance.
+
+## Section 5
+
+In this section, we explore how the Neighborhood variable behaves. As we saw from Assignment 1 with a boxplot of SalePrice by Neighborhood, we could see variability in the SalePrice across neighborhoods. This boxplot is shown below.
+
+```{r}
+# sale price by neighborhood
+saleprice_neighborhood_boxplot <- ames_subdat %>%
+  ggplot(aes(x=Neighborhood,y=SalePrice)) + 
+  geom_boxplot(fill = cbPalette[6], outlier.colour =  cbPalette[2], outlier.shape = 5, outlier.size = 1) +
+  labs(title="SalePrice by Neighborhood", x = "Neighborhood", y = "SalePrice", caption = "*Mean values are denoted by the darkred dots") +
+  theme(text = element_text(size = 8, face = "bold")) + 
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  scale_y_continuous(labels = scales::comma) +
+  stat_summary(fun.y = mean, geom="point", colour = "darkred", size = 1)
+
+grid.arrange(saleprice_neighborhood_boxplot, ncol = 1)
+
+```
+
+We now evaluate boxplots of the residuals from Model 1 by Neighborhood.
+
+```{r}
+residuals_predictor_function(MLR1, "Neighborhood","Scatterplot of Model 1 Residuals vs Neighborhood")
+```
+
+From the residual plot above, we can see that Model 1 fits certain neighborhoods better than others. The neighborhoods with an asterisk (on the left side of the plot) indicate that Model 1 fits these neighborhoods better, since 0 goes through the average of those points. We can see that for neighborhoods without an asterisk, the 0 line for the residuals does not go through the middle of their points.
+
+Moreover, we can visually see that some neighborhoods have more points (or homes). When modeling using a categorical variable, it is important to ensure that the categories have an equal numer of homes, as that helps to increase the accuracy of the model. 
+
+Next, we will compare the mean absolute error from Model 1 to the price per square foot for each neighborhood to determine if there are any trends. We also plot mean SalePrice and price per square foot as another comparison.
+
+```{r}
+# first, we have to add model 1 predictions to ames_subdat b/c previously we were calling functions
+pred <- predict(MLR1,ames_subdat)
+
+# MAE plot
+subdat_sum <- ames_subdat %>%
+  mutate(res = SalePrice - pred, 
+           absres = abs(res)) %>%
+  group_by(Neighborhood) %>%
+  summarise(MAE = mean(absres),
+            TotalPrice = sum(SalePrice),
+            TotalSqft = sum(TotalFloorSF)) %>%
+  mutate(AvgPr_Sqft = TotalPrice/TotalSqft)
+
+mae_plot <- subdat_sum %>%
+  ggplot(aes(x=AvgPr_Sqft, y=MAE)) + 
+  geom_point(color=cbPalette[6], size=2) +
+  ggtitle("Model 1 MAE vs Average\nPrice per Square Foot") +
+  theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) 
+
+# Mean plot
+ames_subdat_all <- ames_subdat %>%
+  group_by(Neighborhood) %>%
+  summarise(MeanPrice = mean(SalePrice),
+            AvgSqFt_Ngbrhd = mean(PriceSqFt))
+  
+mean_plot <- ames_subdat_all %>%
+  ggplot(aes(x=AvgSqFt_Ngbrhd, y=MeanPrice)) + 
+  geom_point(color=cbPalette[6], size=2) +
+  ggtitle("PriceSqFt vs MeanPrice") +
+  scale_y_continuous(labels = scales::dollar) +
+  theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) 
+
+grid.arrange(mae_plot, mean_plot, ncol = 2, widths=9:10, top=textGrob("Scatterplots by Neighborhood", gp=gpar(fontsize=12, fontface = "bold")))
+
+```
+
+From the plot of MAE vs AvgPr_Sqft above, we can see that the generally MAE and AvgPr_Sqft have a positive linear relationship. We can also start to notice that trends are different by neighborhood. For example, we can see there are 3 neighborhoods in the bottom left of the plot and 2 neighborhoods in the top right of the plot. 
+
+Similarly, in the plot on the right, we can see that MeanPrice and AvgSqFt_Ngbrhd also have a positive linear relationship.
+
+From this information, we can separate our neighborhood variable into neighborhood groups by AvgPr_Sqft. Our groups will be:
+
+* <= 110 AvgPr_Sqft (5 neighborhoods)
+* 111 - 130 AvgPr_Sqft (8 neighborhoods)
+* 131 - 150 AvgPr_Sqft (6 neighborhoods)
+* 151+ AvgPr_Sqft (2 neighborhoods)
+
+We will utilize group 4 or neighborhoods with AvgPr_Sqft 151+ as our baseline group.
+```{r}
+ames_subdat <- ames_subdat %>%
+  # we create a new var
+  mutate(NbhdGrp = ifelse(price_sqft <= 110, "grp1",
+                          ifelse(price_sqft <= 130, "grp2",
+                                 ifelse(price_sqft <=150, "grp3","grp4"))),
+         # then we create dummy vars based on this new var
+         NbhdGrp1 = ifelse(NbhdGrp == "grp1", 1, 0),
+         NbhdGrp2 = ifelse(NbhdGrp == "grp2", 1, 0),
+         NbhdGrp3 = ifelse(NbhdGrp == "grp3", 1, 0))
+```
+
+We perform a quick check to see the number of homes in each neighborhood group.
+
+```{r}
+nbhdgrp_plot <- ames_subdat %>%
+  group_by(NbhdGrp) %>%
+  summarise(count=n()) %>%
+  mutate(percent = count/sum(count)) %>%
+  ggplot(aes(x=reorder(as.character(NbhdGrp), desc(count)), y=count, fill=NbhdGrp)) + 
+  geom_bar(stat="identity") +
+  labs(title = "Distribution of NbhdGrp", x="NbhGrp", y="Count") +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values=cbPalette[4:7]) +
+  theme(text = element_text(size = 10, face = "bold")) +
+  guides(fill=FALSE) +
+  geom_text(aes(label=paste0(round(percent*100,0),"%")),position = position_stack(vjust = .5),size=3.5)
+
+grid.arrange(nbhdgrp_plot, ncol = 1)
+
+```
+
+From the bar chart above, we can see that there is a different number of homes in each group. Ideally these groups would have an equal number of neighborhoods as well as an equal number of houses, but we will move forward with these groups until further analysis tells us otherwise. One consideration might be to exclude neighborhoods with AvgPr_Sqft > 160 or to break our groups into even smaller ones.
+
+Now, we will incorporate these new dummy variables into our multiple linear regression model.
+
+### Model 2: TotalFloorSF, HouseAge, and NbhdGrp
+
+The coefficients of this new multiple regression model are shown below. We can readily see that all the NbhdGrp variables have negative coefficients, since group 4 is the baseline category, and it is based on higher price_sqft than the other groups.
+
+```{r}
+MLR2 <- lm(SalePrice ~ TotalFloorSF + HouseAge + NbhdGrp1 + NbhdGrp2 + NbhdGrp3, data=ames_subdat)
+MLR2_sum <- summary(MLR2)
+MLR2_sum$coefficients
+```
+
+```{r}
+# calculate MAE of MLR2
+MAE <- mae_function(MLR2)
+```
+
+If we compare the mean absolute errors, Model 1 has a MAE of 27,300, while Model 2 has a MAE of 15,917. We can see that on the basis of MAE alone, Model 2 is the better model since it has a lower MAE.
+
+## Section 6
+
+In this section, we will compare the results to two multiple linear regression models. These models will have the same predictors but the response variable will be SalePrice in one model and logSalePrice in another model.
+
+The models will use the following predictors:
+
+* TotalFloorSF (continuous)
+* HouseAge (continuous)
+* QualityIndex (continuous)
+* Price per square feet (price_sqft; continuous)
+* Neighborhood Group variable (categorical)
+
+The above variables were chosen due to their relationships with SalePrice, as they are either correlated with SalePrice and/or demonstrate patterns in SalePrice based on different groups. This analysis was performed in Assignments 1 and 2.
+
+### Model 3: SalePrice Model
+
+From the ANOVA results below, we can see that all predictors, except NbhdGrp3, are significant. If we were to select this model, then we might compare this model without NbhdGrp3, but for now, we will move forward with this variable included.
+
+```{r}
+MLR3 <- lm(SalePrice ~ TotalFloorSF + HouseAge + QualityIndex + price_sqft + NbhdGrp1 + NbhdGrp2 + NbhdGrp3, data=ames_subdat)
+summary(aov(MLR3))
+MLR3_sum <- summary(MLR3)
+```
+
+We can interpret the model using the coefficient table below.
+
+```{r}
+MLR3_sum$coefficients
+```
+
+Here is a summary of the coefficient interpretation. Please note that y is SalePrice.
+
+* NbhdGrp1
+    + The model is: y = `r paste(round(MLR3_sum$coefficients[1],0))` + `r paste(round(MLR3_sum$coefficients[2],0))` x TotalFloorSF - `r paste(round(abs(MLR3_sum$coefficients[3]),0))` x HouseAge - `r paste(round(abs(MLR3_sum$coefficients[4]),0))` x QualityIndex + `r paste(round(MLR3_sum$coefficients[5],0))` x price_sqft + `r paste(round(MLR3_sum$coefficients[6],0))`
+    + For each additional 1 square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[2],0))` dollars when all other variables are held constant.
+    + For each additional increase in house age, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[3]),0))` dollars when all other variables are held constant.
+    + For each additional increase in quality index, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[4]),0))` dollars when all other variables are held constant.
+    + For each additional increase in price per square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[5],0))` dollars when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp1 has an average SalePrice of a home that is `r paste(round(MLR3_sum$coefficients[6],0))` dollars higher than NbhdGrp4. 
+
+* NbhdGrp2
+    + The model is: y = `r paste(round(MLR3_sum$coefficients[1],0))` + `r paste(round(MLR3_sum$coefficients[2],0))` x TotalFloorSF - `r paste(round(abs(MLR3_sum$coefficients[3]),0))` x HouseAge - `r paste(round(abs(MLR3_sum$coefficients[4]),0))` x QualityIndex + `r paste(round(MLR3_sum$coefficients[5],0))` x price_sqft + `r paste(round(MLR3_sum$coefficients[7],0))`
+    + For each additional 1 square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[2],0))` dollars when all other variables are held constant.
+    + For each additional increase in house age, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[3]),0))` dollars when all other variables are held constant.
+    + For each additional increase in quality index, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[4]),0))` dollars when all other variables are held constant.
+    + For each additional increase in price per square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[5],0))` dollars when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp2 has an average SalePrice of a home that is `r paste(round(MLR3_sum$coefficients[7],0))` dollars higher than NbhdGrp4. 
+  
+* NbhdGrp3
+    + The model is: y = `r paste(round(MLR3_sum$coefficients[1],0))` + `r paste(round(MLR3_sum$coefficients[2],0))` x TotalFloorSF - `r paste(round(abs(MLR3_sum$coefficients[3]),0))` x HouseAge - `r paste(round(abs(MLR3_sum$coefficients[4]),0))` x QualityIndex + `r paste(round(MLR3_sum$coefficients[5],0))` x price_sqft +`r paste(round(MLR3_sum$coefficients[8],0))`
+    + For each additional 1 square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[2],0))` dollars when all other variables are held constant.
+    + For each additional increase in house age, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[3]),0))` dollars when all other variables are held constant.
+    + For each additional increase in quality index, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[4]),0))` dollars when all other variables are held constant.
+    + For each additional increase in price per square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[5],0))` dollars when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp3 has an average SalePrice of a home that is `r paste(round(MLR3_sum$coefficients[8],0))` dollars higher than NbhdGrp4. Because this amount is so small, we can see why this variable was not significant.
+
+* NbhdGrp4 (baseline group)
+    + The model is: y = `r paste(round(MLR3_sum$coefficients[1],0))` + `r paste(round(MLR3_sum$coefficients[2],0))` x TotalFloorSF - `r paste(round(abs(MLR3_sum$coefficients[3]),0))` x HouseAge - `r paste(round(abs(MLR3_sum$coefficients[4]),0))` x QualityIndex + `r paste(round(MLR3_sum$coefficients[5],0))` x price_sqft
+    + For each additional 1 square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[2],0))` dollars when all other variables are held constant.
+    + For each additional increase in house age, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[3]),0))` dollars when all other variables are held constant.
+    + For each additional increase in quality index, the average SalePrice of a home decreases by `r paste(round(abs(MLR3_sum$coefficients[4]),0))` dollars when all other variables are held constant.
+    + For each additional increase in price per square foot, the average SalePrice of a home goes up by `r paste(round(MLR3_sum$coefficients[5],0))` dollars when all other variables are held constant.
+
+Additionally, in all cases, the NbhdGrp variables for each scenario above could have been combined with the intercept. For ease of interpretation, we kept it separate. Therefore, we can see that the intercept is different for each Neighborhood but the slopes of all the remaining variables are the same.
+
+We continue our analysis of Model 3 by examining diagnostic plots of its residuals to assess goodness of fit.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(MLR3, col=cbPalette[6])
+```
+
+We can see that Model 3 violates the assumptions of linearity, constant variance, and normality from the residual plots above. We can also see some outliers called out in different plots. There do not appear to be highly influential points, as the outliers appear to either be in the x- or y- direction. Even still, the residuals have a pattern, which is easier to see by the curve of the red line, and the residuals depart from the normal QQ-line in the tails.
+
+### Model 4: logSalePrice Model 
+
+From the ANOVA results below, we can see that all predictors are significant.
+
+```{r}
+MLR4 <- lm(logSalePrice ~ TotalFloorSF + HouseAge + QualityIndex + price_sqft + NbhdGrp1 + NbhdGrp2 + NbhdGrp3, data=ames_subdat)
+summary(aov(MLR4))
+MLR4_sum <- summary(MLR4)
+```
+
+We now move forward with the model interpretation, as this interpretation is different from Model 3 above since the response variable is now a log variable.
+
+```{r}
+MLR4_sum$coefficients
+```
+
+Here is a summary of the coefficient interpretation. Please note that y is logSalePrice and there may be slight differences in the coefficients due to rounding.
+
+* NbhdGrp1
+    + The model is: y = `r paste(round(MLR4_sum$coefficients[1],3))` + `r paste(round(MLR4_sum$coefficients[2],3))` x TotalFloorSF - `r paste(round(abs(MLR4_sum$coefficients[3]),3))` x HouseAge + `r paste(round(MLR4_sum$coefficients[4],3))` x QualityIndex + `r paste(round(MLR4_sum$coefficients[5],3))` x price_sqft + `r paste(round(MLR4_sum$coefficients[6],3))`
+    + Each additional 1 square foot results in a `r paste(round(MLR4_sum$coefficients[2]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in house age results in a `r paste(round(MLR4_sum$coefficients[3]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in quality index results in a `r paste(round(MLR4_sum$coefficients[4]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in price per square foot results in a `r paste(round(MLR4_sum$coefficients[5]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp1 has an average SalePrice that is `r paste(round(MLR4_sum$coefficients[6]*100,3),"%",sep="")` higher than NbhdGrp4. 
+
+* NbhdGrp2
+    + The model is: y = `r paste(round(MLR4_sum$coefficients[1],3))` + `r paste(round(MLR4_sum$coefficients[2],3))` x TotalFloorSF - `r paste(round(abs(MLR4_sum$coefficients[3]),3))` x HouseAge + `r paste(round(MLR4_sum$coefficients[4],3))` x QualityIndex + `r paste(round(MLR4_sum$coefficients[5],3))` x price_sqft + `r paste(round(MLR4_sum$coefficients[7],3))`
+    + Each additional 1 square foot results in a `r paste(round(MLR4_sum$coefficients[2]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in house age results in a `r paste(round(MLR4_sum$coefficients[3]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in quality index results in a `r paste(round(MLR4_sum$coefficients[4]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in price per square foot results in a `r paste(round(MLR4_sum$coefficients[5]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp2 has an average SalePrice that is `r paste(round(MLR4_sum$coefficients[7]*100,3),"%",sep="")` higher than NbhdGrp4. 
+  
+* NbhdGrp3
+    + The model is: y = `r paste(round(MLR4_sum$coefficients[1],3))` + `r paste(round(MLR4_sum$coefficients[2],3))` x TotalFloorSF - `r paste(round(abs(MLR4_sum$coefficients[3]),3))` x HouseAge + `r paste(round(MLR4_sum$coefficients[4],3))` x QualityIndex + `r paste(round(MLR4_sum$coefficients[5],3))` x price_sqft + `r paste(round(MLR4_sum$coefficients[8],3))`
+    + Each additional 1 square foot results in a `r paste(round(MLR4_sum$coefficients[2]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in house age results in a `r paste(round(MLR4_sum$coefficients[3]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in quality index results in a `r paste(round(MLR4_sum$coefficients[4]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in price per square foot results in a `r paste(round(MLR4_sum$coefficients[5]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Compared to NbhdGrp4, NbhdGrp3 has an average SalePrice that is `r paste(round(MLR4_sum$coefficients[8]*100,3),"%",sep="")` higher than NbhdGrp4. 
+
+* NbhdGrp4 (baseline group)
+    + The model is: y = `r paste(round(MLR4_sum$coefficients[1],3))` + `r paste(round(MLR4_sum$coefficients[2],3))` x TotalFloorSF - `r paste(round(abs(MLR4_sum$coefficients[3]),3))` x HouseAge + `r paste(round(MLR4_sum$coefficients[4],3))` x QualityIndex + `r paste(round(MLR4_sum$coefficients[5],3))` x price_sqft
+    + Each additional 1 square foot results in a `r paste(round(MLR4_sum$coefficients[2]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in house age results in a `r paste(round(MLR4_sum$coefficients[3]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in quality index results in a `r paste(round(MLR4_sum$coefficients[4]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+    + Each additional increase in price per square foot results in a `r paste(round(MLR4_sum$coefficients[5]*100,3),"%",sep="")` percentage change in SalePrice when all other variables are held constant.
+
+Similar to Model 3, for Model 4, the NbhdGrp variables could have been combined with the intercept. For ease of interpretation, we kept it separate. Therefore, we can see that the intercept is different for each Neighborhood but the slopes of all the remaining variables are the same. The log transformation of SalePrice does not change this model behavior.
+
+Next, we examine diagnostic plots to determine goodness of fit.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(MLR4, col=cbPalette[6])
+```
+
+Although the behavior of some of the residuals has improved relative to Model 3, we can see that the residuals vs fitted values now have an inverted U-pattern and the residuals depart from the normal QQ-line in the left tail. Additionally, there appear to be some influential points in the lower right of the plot. This means that further explortaion and decisioning is needed in how to handle these points. All in all, this model does not fit the data best as core assumptions of linearity, constant variance, and normality are violated.
+
+### Model 3 and 4 Comparison
+
+In comparing Model 3 and Model 4, there is no clear winner.
+
+First, if we compare the adjusted R squared values, Model 3 with SalePrice has an adjusted R squared value of `r paste(round(MLR3_sum$adj.r.squared,2)*100,"%",sep="")` and Model 4 with logSalePrice has an adjusted R squared value of `r paste(round(MLR4_sum$adj.r.squared,2)*100,"%",sep="")`. Although these adjusted R squared values are comparable, the slight edge is given to Model 3.
+
+Next, if we compare their diagnostic plots, Model 4 has the slight advantage. Although both models do not meet assumptions of linear regression, Model 4 residuals have a less pronounced pattern than Model 3. Model 4 residuals also align better to the normal QQ-line, even though there is a depature in the left tail. This pattern supports the rationale for transformation: to help a model meet the assumptions of linear regression. Both models have outliers, but with Model 4, there appear to be influential points. It would be interesting to remove these influential points in Model 4 to see if the fit is improved.
+
+Furthermore, in assessing multicollinearity, price_sqft and NbhdGrp1 have very high VIFs (price_sqft = 7.4, NbhdGrp1 = 11.4). These values are cause for concern and show that there are multicollinearity issues with these models. Therefore, one of these variables should be removed (e.g., price_sqft) and the model reassesed for multicollinearity.
+
+Given all of this information, it is clear that the modeling process needs to continue before an appropriate model can be selected.
+
+```{r}
+# MAE of MLR4
+MAE <- mae_function(MLR4)
+```
+
+Lastly, in comparing the residual standard errors, Model 3 has a residual standard error of 13,350 and Model 4 has a residual standard error of .078. A metric like this or even MAE, however, is not as revealing since the log transformation is typically performed to address linearity issues and improve conformity to constant variance and normality. Log transformation is also helpful in situations where we are dealing with a skewed distribution. From assignment 2, we saw that before the transformation, SalePrice skewness was `r paste(round(skewness(ames_subdat$SalePrice),2))` and after the log transformation, it is `r paste(round(skewness(ames_subdat$logSalePrice),2))`. Comparing residual standard errors and MAE would be more revealing on two models with logSalePrice, for example.
+
+In this specific instance, the desire to transform SalePrice was due the the wedge-shaped pattern with other predictors and the violation of constant variance in examining the residuals. Transformation was not due to theoretical considerations or the fact that the problem at hand involved a binomal or Poisson distribution. The evidence to transform SalePrice came from the patterns displayed in the diagnostic plots.
+
+Deciding if a predictor requires a transformation is a more involved process. First, plotting the response variable, SalePrice, and each predictor in the model should be performed. Power transformations can be utilized to see which transformation yields a linear relationships between these two variables (if there is evidence of a lack of linear relationship). If the response variable is transformed first, and there are still concerns about linearity, then a predictor variable could be transformed. In our specific instance, log transformation of the predictor variables does not seem warranted since logSalePrice has a linear relationship with the continuous predictor variables. The next logical step, rather, appears to be exploration and potential removal of influential points.
+
+##Section 7
+
+In this section, we will explore the fit of Model 4 after identifying and removing influential points.
+
+First, let's begin by calculating the DFFITS values for Model 4. DFFITS is one statistical approach to systematically identify and remove influential points.
+
+For Model 4, we have n = 2386 and p = 7. Therefore, our DFFITs cuttoff value is: .116. 
+
+In calculating DFFITs, 139 points are identified to be influential points, which seems like a high number.
+
+```{r}
+# calculate dffits
+# want to make sure create a new df here
+dffitslog <- dffits(MLR4)
+ames_dffits <- cbind(ames_subdat,dffitslog)
+
+dffits_count <- ames_dffits %>%
+  filter(dffitslog >= .116 | dffitslog <= -.116)
+
+# remove these influential points
+ames_subdat2 <- ames_dffits %>%
+  filter(!(dffitslog >= .116 | dffitslog <= -.116))
+```
+
+After removing the 139 influential points, we will now refit the model and examine the goodness of fit.
+
+First, from the ANOVA results below, we can see that all predictors are significant in this new model. We note that the removal of these influential points did not alter significance.
+
+```{r}
+MLR5 <- lm(logSalePrice ~ TotalFloorSF + HouseAge + QualityIndex + price_sqft + NbhdGrp1 + NbhdGrp2 + NbhdGrp3, data=ames_subdat2)
+summary(aov(MLR5))
+MLR5_sum <- summary(MLR5)
+```
+
+Next, we examine the diagnostic plots, which are shown below.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(MLR5, col=cbPalette[6])
+```
+
+This result is very surprising. We can see that the residuals vs fitted values and scale-location visuals show that the residuals clearly follow a U-shape or quadratic pattern. Adding a quadratic term may be an appropriate next step in the modeling process. Moreover, we can see that the residuals more closely follow the normal QQ-line. We can see that the removal of the 139 influential points has corrected the skewness in the left tail. Additionally, we can see in the residuals vs leverage visual, we no longer have outliers in both the x- and y-direction.
+
+A better visual might be to compare the influential plots before and after the removal of these points. Model 5 is Model 4 without the influential points.
+
+```{r}
+par(mfrow=c(1,2))
+influencePlot(MLR4,	id.method="identify", main="Model 4", 
+              sub="Circle size is proportial to Cook's Distance", col=cbPalette[6])
+influencePlot(MLR5,	id.method="identify", main="Model 5", 
+              sub="Circle size is proportial to Cook's Distance", col=cbPalette[6])
+
+```
+
+In comparing these influence plots, we can see that in Model 5 we have 'zoomed in' on the majority of points in the data set. However, in Model 5, there still appear to be some influential points as there are circles with large sizes.
+
+Finally, we will compare the MAE values before and after the removal of these influential points.
+
+```{r}
+# MAE of MLR5
+MAE <- mae_function(MLR5)
+```
+
+* Before (Model 4): 180701
+* After (Model 5): 178355
+
+The MAE after the removal of these influential points is only marginally better. The MAE values for both models is very high, which suggests that there is a better model out there that will have a lower MAE.
+
+All in all, the goodness of fit in this new model is hardly improved. It appears that the removal of these points has revealed a stronger pattern of the residuals following a U-shape. This pattern suggests that the addition of a quadratic term to the model is needed.
+
+# Summary and Conclusions
+
+In this assignment, we explored various goodness of fit techniques on a host of models.
+
+We began with a subset of Ames data and defined dummy variables for BedroomAbvGr. This step prepared us for sections later in the assignment.
+
+From a modeling perspective, we created a multiple linear regression model with TotalFloorSF and HouseAge, since these two variables had strong linear relationships with SalePrice as well as no linear relationship with one another. Although this model (Model 1) had strong goodness of fit metrics, its residuals showed that this model violated regression assumption.
+
+Additionally, we noticed some behavior with the Neighborhood Group variable when analyzing price per square feet and the fit of this model against neighborhoods. Therefore, we incorporated our newly formed Neighborhood Group variable into a multiple linear regression model (Model 2) and saw that on the basis of MAE, this model performed better than the model without this Neighborhood Group variable.
+
+Overall, we saw that all models struggled to meet the core assumptions of linearity, constant variance, and normality when examining their residual plots. Therefore, we created a model using logSalePrice and although the fit was better, it was not perfect. In examining the diagnostic plots, we observed several influential points, calculated their DFFITS values, removed these 139 influential points, and refit the model. To our surprise, the residuals showed an even more distinct pattern. This entire process helped to demonstrate that creating a 'good' model is not a linear process.
+
+In reflecting on this assignment, we saw that variable transformation and outlier deletion impact the modeling process. For one, variable transformation improves constant variance and thereby also improves normality as well as the linear relationship between variables. Although this observation is a plus, transforming a dependent variable makes the interpretation of the model more difficult. When trying to explain this model to someone without a statistical background, challenges may arise. Moreover, it is unclear right now if predictor variables would benefit from log transformation. We transformed SalePrice becasue of the wedge-shaped pattern it demonstrated, but we did not explore power transformations to determine if different transformations would help or if predictor variables in our model should be transformed as well.
+
+Furthermore, the presence of outliers and influential points pose challenges to the modeling process, as we do not want to instill bias in our results by removing several observations. Not all variability in the data set is bad, but without having additional context as to why we were seeing these outliers, it makes it difficult to know if we are making the right decision by removing these points. Moreover, after removing our influential points, the residuals demonstrated a clear quadratic pattern, which alludes to adding a quadtric term to our model to see how that improves model fit. Lastly, we chose to evaluate outliers on the basis of DFFITS, but there are other methods as well. Comparison could be done against other methods to determine if the deletion results would be different.
+
+Therefore, transformations and outlier deletion add complexity to the model creation and validation process, but they are both necessary steps in order to form the best model for a given set of data.
+
+While this assignment focused on model building and adequacy-checking, it is clear that more work is needed to find an adequate model. Once this adequate model is found, then hypothesis testing should be performed to determine if all variables in this model are needed (e.g., partial F tests). Once this adequate model is found, then the validation step is entirely dependent on the intended use of the model. For instance, if the purpose of this sale price model is for statistical inference, then maybe two adequate models are selected and fitted to the data and their residuals are compared to one another to determine which one has the 'best' fit to the 2006-2010 data. However, if the purpose of this model is for predictive purposes, then applying this model to a new data set, possibly Ames housing data from 2011+, would be beneficial. This process of using out-of-sample data for validation would help reveal if there is any new behavior in the Ames housing market and would also tell us how well the model fits this new data. This step is vitally important if the model is to be used to predict future sale prices of homes.
