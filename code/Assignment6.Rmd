@@ -1,0 +1,535 @@
+---
+title: "Julia Rodd Assignment 6"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, error=FALSE, warning=FALSE, message=FALSE)
+# data prep
+library(tidyverse)
+library(forcats)
+library(reshape)
+
+# modeling
+library(rockchalk)
+library(car)
+library(tidymodels)
+
+# visualization
+library(rmarkdown)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(kableExtra)
+
+# other
+library(readxl)
+library(ggrepel)
+library(knitr)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/msds-regression-multivariate-analysis/code")
+
+# set seed
+set.seed(4595)
+
+```
+
+```{r, renv init, eval=FALSE}
+# make sure to save package environment
+# first, we have to initiliaze
+renv::init()
+```
+
+# Introduction
+
+This assignment utilizes a data set of daily closing stock prices from twenty stocks of various industries and a large-cap index fund from Vanguard (VV). The primary purpose of this assignment is to apply both linear regression and principal components analysis (PCA) techniques to identify which stocks best explain the variation in the market index. Ultimately, commentary is provided on the model fit and predictive accuracy of several iterations of the linear regression and PCA models.
+
+# Results
+
+```{r}
+# read in our data
+industry_mapping <- read_excel('../data/stock_industry.xlsx')
+dat <- read.csv(file="../data/stock_portfolio.csv",head=TRUE,sep=",")
+
+sorted.df <- dat %>%
+  mutate(RDate = as.Date(Date,'%d-%B-%y')) %>%
+  arrange(RDate)
+
+# professor created vars this way
+# tried taking a more tidy approach but results do not perfectly align
+log_lag_function <- function(x){
+  xx <- sorted.df[[x]]
+  
+  log(xx[-1]/xx[-dim(sorted.df)[1]])
+}
+
+AA <- log_lag_function("AA")
+returns.df <- as.data.frame(AA)
+
+returns.df$BAC <- log_lag_function("BAC")
+returns.df$BHI <- log_lag_function("BHI")
+returns.df$CVX <- log_lag_function("CVX")
+returns.df$DD  <- log_lag_function("DD")
+returns.df$DOW <- log_lag_function("DOW")
+returns.df$DPS <- log_lag_function("DPS")
+returns.df$GS  <- log_lag_function("GS")
+returns.df$HAL <- log_lag_function("HAL")
+returns.df$HES <- log_lag_function("HES")
+returns.df$HON <- log_lag_function("HON")
+returns.df$HUN <- log_lag_function("HUN")
+returns.df$JPM <- log_lag_function("JPM")
+returns.df$KO  <- log_lag_function("KO")
+returns.df$MMM <- log_lag_function("MMM")
+returns.df$MPC <- log_lag_function("MPC")
+returns.df$PEP <- log_lag_function("PEP")
+returns.df$SLB <- log_lag_function("SLB")
+returns.df$WFC <- log_lag_function("WFC")
+returns.df$XOM <- log_lag_function("XOM")
+returns.df$VV  <- log_lag_function("VV")
+
+# this is what i tried....
+# want to create new vars that show the logged difference in prices between days
+# had to add the negative b/c didn't align to orig way
+# log_lag_function <- function(x){
+#   -log(lag(x)/x)
+# }
+# 
+# returns.df <- dat %>%
+#   mutate(RDate = as.Date(Date,'%d-%B-%y')) %>%
+#   arrange(RDate) %>%
+#   select(-contains("Date")) %>%
+#   mutate_all(funs(z = log_lag_function(.))) %>%
+#   # first row is null values so remove thatta
+#   slice(-1) %>%
+#   # we want to remove orig columns and drop the _z on the new columns
+#   select(contains("_z")) %>%
+#   rename_all(funs(str_replace(., "_z", "")))
+```
+
+
+## Section 1: Exploratory Data Analysis
+
+Before we begin our exploratory data analysis work, it is worth noting that we have transformed our original data set for this assignment. We are using the log-returns of the twenty stocks to explain the variation in the log-returns of the market index.  
+
+We now analyze the correlations that these twenty stocks have with the market index (VV).
+
+Below is a statistical graph demonstrating the correlations with the market index.
+
+```{r}
+# Compute correlation matrix for returns
+# using as_tibble() loses the stock names and converts rownames to numeric
+# hence, why this is not in a 'tidy' format
+returns.cor <- cor(returns.df) 
+returns.cor <- cbind(returns.cor, "stock"=rownames(returns.cor)) %>%
+  as_tibble() 
+
+returns.cor %>%
+  select(stock, VV) %>%
+  # don't want to show correlation with itself
+  filter(VV != 1) %>%
+  # by default, correlations are characters
+  mutate(VV = as.numeric(VV)) %>%
+  ggplot(aes(x = fct_reorder(stock,VV), y=VV)) +
+  geom_bar(stat="identity", fill=cbPalette[6]) +
+  labs(title = "Correlations with VV", x="", y="") +
+  coord_flip() 
+
+```
+
+From this correlation bar graph, which has been ordered by magnitude, we can see the HON, MMM, and WFC have the largest correlations with the index fund. In contrast, PEP, MPC, and DPS have the smallest correlations with the index fund. All correlations are positive. In building a regression model, generally we want to select predictors that have the highest correlation with our response variable. Therefore, this statistical graph starts to reveal insights about which predictors may be important in our model.
+
+Next, we present similar information about correlation, but we have created a correlation plot instead.
+
+```{r}
+# create a correlation plot
+returns.cor <- cor(returns.df) 
+
+corrplot(returns.cor,tl.col = "black", order = "hclust", type="upper", method="color", title = "Correlation Plot", mar=c(0,0,1,0))
+
+```
+
+This correlation plot can be considered a data visualization, since the properties of this visual are more geared toward visual elements. For instance, we have changed this plot to just show the upper part of the plot, as by showing the full plot, duplicate information is shown. Additionally, we have adjusted the properties of the correlation plot to utilize squares so the correlation plot is more like a heat map. This change improves the readability of the plot, as the default is circles where both size and shade are indicators of the strength of the correlation. In the view above, there is only one element that needs to be analyzed (shade) to gain information on the strength of the relationship, which in turn simplifies the plot. Lastly, the text on the plot was changed to black and a 45-degree tilt was added to the stocks on the top row. These small formatting changes improve the readability of the visual and enable the sharing of this information with business stakeholders. In contrast, the correlation bar chart does not present information in a visually appealing way and may not be a graphic that is shared with business stakeholders.
+
+While the primary purpose of a statistical graphic is to reveal properties of the data, the same type of information can be gleaned from a data visualization. For instance, from the correlation plot, we can see that all squares are blue, which means that all stocks have a positive correlation with one another and with the index fund. We are also able to gain a lot more information from the correlation plot vs the correlation bar chart, as we now have context on which stocks are correlated with one another. For instance, the stocks of KO, BHI, and HUN appear to have moderately strong correlations with VV but moderately low to low correlations with one another. Thus, their VIF values should be low. In constrast, HON, MMM, and WPC, the stocks with the highest correlations with the index fund (VV), have high correlations with one another and with other stocks. Therefore, right away, we can see that we have potential multicollinearity issues that will need to be addressed, as stocks that are highly correlated with VV are also highly correlated with other stocks. In summary, although the correlation plot is a data visualization, it is also a tool that reveals helpful information about the relationships of the variables (stocks) in the data set. This visual just presents this type of information in a more appealing way, especially in comparison to the correlation bar chart.
+
+## Section 2: Initial Model Results
+
+We continue our exploratory analysis work by fitting two models. One model (Model 1) has eight random stocks, while the other model is a full model (Model 2). We perform this step to gain some initial insights on model fit and multicollinearity issues, as modeling can be considered a form of exploratory data analysis.
+
+```{r, train test split}
+# first split into train & test sets
+stock_split <- initial_split(returns.df, prop = 0.70)
+
+stock_train <- training(stock_split) 
+
+stock_test <- testing(stock_split)
+```
+
+```{r, fit initial models}
+# use parsnip pkg to fit models
+model.1 <- returns.df %>%
+  linear_reg(mode = "regression", penalty = NULL) %>%
+  set_engine("lm") %>%
+  fit(VV ~ GS+DD+DOW+HON+HUN+JPM+KO+MMM+XOM, data=returns.df)
+
+model.2 <- returns.df %>%
+  linear_reg(mode = "regression", penalty = NULL) %>%
+  set_engine("lm") %>%
+  fit(VV ~ ., data=returns.df)
+
+```
+
+
+Below is a chart with the VIF values for both of these models. The VIF values for Model 2 are sorted in decreasing order so the stock with the highest VIF value is shown first.
+
+```{r, vif table}
+# this is gross but need to make these data frames and arrange in descending order first
+# if pip into arrange then lose the stock names
+model1_vif <- as.data.frame(sort(vif(model.1$fit),decreasing = TRUE)) 
+
+model2_vif <- as.data.frame(sort(vif(model.2$fit),decreasing = TRUE)) 
+
+# create a function to stack these results together
+# doing this b/c there are unequal rows/they have diff coefficients
+combine.df <- function(x, y) {
+    rows.x <- nrow(x)
+    rows.y <- nrow(y)
+    if (rows.x > rows.y) {
+        diff <- rows.x - rows.y
+        df.na <- matrix(NA, diff, ncol(y))
+        colnames(df.na) <- colnames(y)
+        cbind(x, rbind(y, df.na))
+    } else {
+        diff <- rows.y - rows.x
+        df.na <- matrix(NA, diff, ncol(x))
+        colnames(df.na) <- colnames(x)
+        cbind(rbind(x, df.na), y)
+    }
+}
+
+tot_vif <- combine.df(model2_vif, model1_vif) %>%
+  # can rename based on position
+  dplyr::rename(`Model 2`= 1,
+         `Model 1` = 2) %>%
+  select(`Model 1`,`Model 2`) 
+
+kable(tot_vif, "html", align = 'l', digits=2) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "VIF Output" = 2))
+```
+
+To our surprise, the VIF values are not extremely high. SLB has the highest VIF value in both models. However, if there is no multicollinearity in a model, then the VIF values should be 1. It is an implicit assumption in linear regression that all predictors are orthogonal to one another. VIF measures how much the variance of an estimated regression coefficient increases if the predictors are correlated. If the predictors are truly orthogonal, then their R-squared value will be 0, which results in a VIF of 1 (as the VIF formula is 1/(1-R-squared) applied to each predictor). However, if the predictors are not orthogonal, then their R-squared value will tend toward 1, which results in a high VIF (this tends toward infinity). As a general rule of thumb, if the VIF values are greater than 10, then we have multicollinearity issues that need to be addressed.
+
+While we do not have concerns about multicollinearity, we can utilize PCA techniques to select the most important predictors in our model. Moreover, by definition, PCA ensures that the predictors are orthogonal to one another, so their VIF values are all 1.
+
+```{r, get adjusted R-squared vals}
+model1_pred <- model.1 %>% 
+  predict(new_data = returns.df) %>% 
+  mutate(truth = returns.df$VV)
+
+m1_rsq <- rsq(model1_pred, truth = truth, estimate = .pred)
+
+model2_pred <- model.2 %>% 
+  predict(new_data = returns.df) %>% 
+  mutate(truth = returns.df$VV)
+
+m2_rsq <- rsq(model2_pred, truth = truth, estimate = .pred)
+
+```
+
+Before turning to PCA, we make a couple initial comments on the fit of these two models:
+
+* In Model 1, all predictors are significant, and the residual standard error is `r sd(model.1$fit$residuals)`.
+* In Model 2, all predictors are not significant, and the residual standard error is `r sd(model.2$fit$residuals)`. The adjusted R-squared for this model (`r paste0(round(m2_rsq$.estimate*100,1),"%")`) is higher compared to the adjusted R-squared for Model 1 (`r paste0(round(m1_rsq$.estimate*100,1),"%")`).
+
+With the PCA techniques, we hope to improve upon the results shown here.
+
+## Section 3: Principal Components Analysis
+
+We begin our PCA work by viewing a plot of the loadings of first two principal components. In this context, the loadings are eigenvectors, which are essentially the coefficients for each principal component. Overall, these first two components have a greater variance than the remaining components and can be thought to explain the most variation in the original data.
+
+With this information, we analyze the plot of the loadings. There is also color coding of the stocks by industry.
+
+```{r}
+# have to remove VV
+returns.pca <- princomp(x=returns.df[,-21],cor=TRUE)
+
+pc.1 <- returns.pca$loadings[,1]
+pc.2 <- returns.pca$loadings[,2]
+
+pca_df <- data.frame(cbind(pc.1,pc.2)) %>%
+  rownames_to_column("stock") %>%
+  left_join(industry_mapping,by="stock")
+
+pca_df %>%
+  ggplot(aes(x=pc.1,y=pc.2)) +
+  geom_point() + 
+  geom_label_repel(aes(label=stock,fill=as.factor(industry))) +
+  labs(title="Plot of PC 1 and PC 2", x = "PC 1", y = "PC 2") +
+  guides(fill=guide_legend("Industry")) +
+  scale_fill_manual(values=cbPalette[2:8])
+
+```
+
+From this plot, we can see that there are very different trends by industry. For instance, we can see that soft drinks have different eigenvectors for these first two components than stocks of other industries, as they are located in the bottom of the plot away from the others. 
+
+Additionally, we can better see in our data that some industries are better represented than others. For instance, Manufacturing and Industrial - Metals have less stocks than other industries. However, we are not able to derive additional information from this plot, as analyzing the variances of each of these stocks is really what is most helpful in determining their importance. In short, this plot is not very useful or applicable in determining model fit and variable importance.
+
+## Section 4: Using PCA for Dimension Reduction
+
+One of the benefits of using PCA is that we can identify which variables are most important to our model. That is, PCA identifies which variables explain a 'significant' amount of variation in the data. Therefore, we can utilize PCA to reduce the number of variables that we use in our model. As we continue forward with our analysis, it will be important to keep this concept in mind. Later, we will want to compare our model results to a full model (all 20 stocks).
+
+Below is a single plot that contains vital information. First, we have a scree plot, which captures the variance, or eigenvalues, for each principal component. By definition, the principal components are ordered by size of their variance. Additionally, we have layered on the cumulative variation (total variance) that these components explain in the data. We will utilize this plot to inform how many principal components we should keep for our model.
+
+```{r}
+# Define values to make a scree plot
+scree.values <- (returns.pca$sdev^2)/sum(returns.pca$sdev^2);
+variance.values <- cumsum(returns.pca$sdev^2)/sum(returns.pca$sdev^2);
+Component <- seq(from = 1, to = 20, by = 1)
+scree_df <- data.frame(Eigenvalue=scree.values, TotalVariation <- variance.values,Component=Component)
+
+scree_df %>%
+  ggplot(aes(x=Component)) +
+  geom_line(aes(y=Eigenvalue, colour=cbPalette[6]),size=1) + 
+  geom_point(aes(y=Eigenvalue, colour=cbPalette[6]),size=2) +
+  geom_line(aes(y=TotalVariation, colour=cbPalette[7]),size=1) + 
+  geom_point(aes(y=TotalVariation, colour=cbPalette[7]),size=2) +
+  geom_hline(yintercept=.8) +
+  geom_text(aes(x = 3, y = .82,label = "80% line"), size=3) +
+  scale_color_manual(values=cbPalette[6:7], labels=c("Individual Variance","Total Variance")) +
+  labs(title="Scree Plot with Total Variance Explained", x="Number of Components",y="Percent") +
+  scale_y_continuous(labels=scales::percent) +
+  guides(colour=guide_legend("Legend"))
+
+```
+
+From this plot, we can see that 8 components helps to explain 80% of the total variation (variance) in the data, as the 8th component intersects with the 80% line. This is one decision rule that can be applied to determining how many principal components should be used in a model. We can also see that the first 5 components yields just over 70% of variation, while 13 components gives us just over 90% of variation. The guidelines for determining how many principal components to use are not hard and fast. Rather, utilizing the business objectives for the model may help to guide the decision-making process, especially if accuracy is an important goal.
+
+Another decision rule is the average eigenvalue rule, which states that the number of components that should be kept should be greater than or equal to the average eigenvalue. In this case, the average eigenvalue is .05, which means that from this decision rule, we should keep the first 3 components, which explain about 63% of total variation. This decision rule is in line with the scree plot, which has an elbow at 4. 
+
+In short, when determining how many principal components to keep, it is helpful to analyze the results from various decision rules. Because we have higher standards for accuracy, we will move forward with 8 principal components, which account for 80% of the total variation in the data.
+
+## Section 5: Principal Components in Predictive Modeling
+
+We are now ready to begin the modeling process with our 8 principal components. The predictors in our model are technically the scores of the princomp R function, which is the result of using the eigenvectors (loadings) to transform the original data. Therefore, the predictors are the coefficients of the new linear combinations of the original variables, which by definition, are called the principal components.
+
+We will utilize cross validation techniques and split our data 70/30 into training and test sets. It is worth noting that our data set in this case is a data frame of all the scores, which means that each column is now a principal component with observations that have been transformed.
+
+```{r, pca top 8 train test split}
+pca_df_full <- as.data.frame(cbind(returns.pca$scores, returns.df$VV)) %>%
+  dplyr::rename(VV=V21) 
+
+pca_df_top_8 <- pca_df_full %>%
+  # select first 8 PCs
+  select(VV, 1:8)
+
+# first split into train & test sets
+pca_split <- initial_split(pca_df_top_8, prop = 0.70)
+
+pca_train <- training(pca_split) 
+
+pca_test <- testing(pca_split)
+```
+
+From the table below, we can quickly validate that our training and test sets equal the length of our original data frame, which has 501 rows.
+
+```{r}
+text_tbl <- data.frame(
+  Data = c("train.scores", "test.scores", "Total"),
+  Observations = c(nrow(pca_train), nrow(pca_test), nrow(pca_train)+nrow(pca_test)))
+
+kable(text_tbl, "html", align='l', col.names=c("Data Set", "Number of Observations")) %>%
+  kable_styling(full_width = F, position = "left")
+```
+
+One metric that we will utilize for model comparison is MAE, or mean absolute error. This metric helps to tell us, on average, the difference between the predicted (fitted) values and the actual values.
+
+The table below shows the MAE for the training and test sets.
+
+```{r, define lm spec}
+lm_spec <- 
+  linear_reg(mode = "regression", penalty = NULL) %>%
+  set_engine("lm") 
+```
+
+```{r, fit pca model}
+# use parsnip to fit model - training set
+pca.m1 <- lm_spec %>%
+  fit(VV ~ ., data = pca_train)
+
+# compute the Mean Absolute Error
+# create a function to do this
+mae_function <- function(lm_fit, new_dat){
+  
+  df <- lm_fit %>% 
+    predict(new_data = new_dat) %>% 
+    mutate(truth = new_dat$VV)
+
+ mae(df, truth = truth, estimate = .pred)$.estimate
+}
+
+pca_train_mae <- mae_function(pca.m1, pca_train)
+pca_test_mae <- mae_function(pca.m1, pca_test)
+
+```
+
+```{r, show PCA MAE results}
+text_tbl <- data.frame(
+  Data = c("train.scores", "test.scores"),
+  Observations = c(round(pca_train_mae,4), round(pca_test_mae,4)))
+
+kable(text_tbl, "html", align='l', col.names=c("Data Set", "MAE")) %>%
+  kable_styling(full_width = F, position = "left")
+
+```
+
+From this table, we can see that the MAE for the test set is just slightly worse than the train set, which is anticipated. This MAE table is not very helpful just yet, as there is no context for comparison. However, this information will be helpful to keep in mind as we progress (iterate) through the modeling process.
+
+Before we move forward, we show the VIF values from the training set for this PCA model. The VIF values are displayed in order to demonstrate that we do not have any issues with multicollinearity when working with PCA.
+
+```{r}
+pca1.train.vif <- vif(pca.m1$fit)
+
+kable(pca1.train.vif, "html", col.names=c("VIF"), align = 'l') %>%
+  kable_styling(full_width = F, position = "left") 
+```
+
+From this table, we can see that all the VIF values for our 8 components (predictors) are approximately 1. The nature of PCA is to create a linear combination of the original variables where these new variables are orthogonal to one another. Again, orthogonality is an implicit assumption in linear regression, but it cannot always be met when working with the original/raw data. Therefore, we can actually see that in PCA the predictors all have a VIF value of 1, which means that we do not need to address multicollinearity before moving forward with our modeling process.
+
+## Section 6: Model Comparisons
+
+We now compare the results of our PCA model (from Section 5) to the models created in Section 2. Because our Section 2 models were applied to the raw data and the PCA model was applied to the transformed data, we need to re-assess model performance on the same data set. Therefore, we will apply the PCA model to our original data set, returns, which has 501 observations.
+
+Like in previous sections, we begin the modeling process by splitting the returns data frame 70/30 into training and test sets.
+
+From the table below, we can see that the trianing and test sets combined equal the total number of observations in our original data set, 501.
+
+```{r}
+text_tbl <- data.frame(
+  Data = c("train.returns", "test.returns", "Total"),
+  Observations = c(nrow(stock_train), nrow(stock_test), nrow(stock_train)+nrow(stock_test)))
+
+kable(text_tbl, "html", align='l', col.names=c("Data Set", "Number of Observations")) %>%
+  kable_styling(full_width = F, position = "left")
+
+```
+
+Next, we present the MAE values of our three models in a single chart to allow for easiser comparisons.
+
+```{r, model 1}
+m1 <- lm_spec %>%
+  fit(VV ~ GS+DD+DOW+HON+HUN+JPM+KO+MMM+XOM, data = stock_train)
+
+m1_train_mae <- mae_function(m1, stock_train)
+m1_test_mae <- mae_function(m1, stock_test)
+
+model1_mae <- rbind(m1_train_mae,m1_test_mae)
+rownames(model1_mae) <- c("train.returns","test.returns") # rename the rows so the table looks nice
+```
+
+```{r, model 2}
+# Fit model.2 on train data set and 'test' on test data;
+m2 <- lm_spec %>%
+  fit(VV ~ ., data = stock_train)
+
+m2_train_mae <- mae_function(m2, stock_train)
+m2_test_mae <- mae_function(m2, stock_test)
+
+model2_mae <- rbind(m2_train_mae,m2_test_mae)
+
+```
+
+```{r, generate table}
+pca1_mae <- rbind(pca_train_mae,pca_test_mae)
+
+mae_values <- round(cbind(model1_mae, model2_mae, pca1_mae),4)
+
+kable(mae_values, "html", align='l', col.names=c("Model 1", "Model 2", "PCA")) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "MAE Values" = 3))
+```
+
+From the MAE table, we can see that all models have fairly similar MAE performance. Going deeper, we can see that Model 2 and the PCA model have slightly superior performance. However, the PCA model has two advantages over Model 2:
+
+1. The PCA model has 8 variables, while Model 2 has 20 (since it used all 20 stocks)
+2. The PCA model has absolutely not multicollinearity issues, while Model 2 has some variability in the VIF values of its predictors
+
+Therefore, we can conclude that the PCA model is a better model than Models 1 and 2, but we cannot conclude that this specific PCA model is the best model. The reason for this is that we applied our 't-shirt' decision rule and selected the first 8 components, which was really an arbitrary number. We did not, in short, identify the specific combination of components that best predicted the index fund.
+
+## Section 7: PCA and Variable Selection Methods
+
+In this section, we combine variable selection methods and PCA techniques to help identify which PCA model is the best model. 
+
+For brevity, we apply the backward elimination method to our scores data frame to determine which components yield the lowest overall model AIC value and compare these results to our prior model results. Below is a MAE table of the results from all of our models.
+
+```{r, full model PCA, include=FALSE} 
+pca_split <- initial_split(pca_df_full, prop = 0.70)
+
+pca_train <- training(pca_split) 
+
+pca_test <- testing(pca_split)
+
+# Fit full.lm on PCA scores of train data
+full.lm <- lm(VV ~ ., data=pca_train)
+
+library(MASS)
+backward.lm <- stepAIC(full.lm,direction=c('backward'))
+#summary(backward.lm)
+
+backward.mae.train <- mean(abs(pca_train$VV-backward.lm$fitted.values))
+#vif(backward.lm)
+
+backward.test <- predict(backward.lm, newdata=pca_test)
+backward.mae.test <- mean(abs(pca_test$VV-backward.test))
+
+backward_mae <- rbind(backward.mae.train, backward.mae.test)
+
+mae_values <- round(cbind(model1_mae, model2_mae, pca1_mae, backward_mae),4)
+
+```
+
+```{r}
+kable(mae_values, "html", align='l', col.names=c("Model 1", "Model 2", "PCA", "Backward Elimination")) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "MAE Values" = 4))
+
+```
+
+From our MAE table, we can see that the backward selection method has slightly better MAE values than the PCA model, and these values are also better than the MAE values of Models 1 and at least equivalent to Model 2. 
+
+Although MAE is one metric that provides insight into the predictive accuracy of a given model, it is not the only metric. We will provide some brief commentary on the fit of these models, knowing that the PCA models are superior because their predictors are orthogonal.
+
+We present the ANOVA results from the initial PCA model and the backward elimination PCA model on the training data set for comparison.
+
+```{r, echo=FALSE}
+summary(pca.m1$fit)
+summary(backward.lm)
+```
+
+First, we can see that the backward elimination method has selected 7 components, whereas applying the '80% rule' meant we kept 8 components. Moreover, we can readily see that the backward elimination method did not select the first 7 components. Rather, components 1, 2, 3, 9, 10, 11, and 14 were selected for the model. Furthermore, we can see that in the initial PCA model, only 3 components are significant at the .10 level, while in the backward elimination model, all components, except component 3, are significant at the .10 level. Lastly, if we compute the AIC values, we can see that the backward elimination model has a slightly lower AIC value (backward AIC = -3021.041 vs initial PCA AIC = -3002.028). Lower AIC values are better, so this tells us that the slight edge should be given to the backward elimination model as being the better model.
+
+In both cases, we can see that the residual standard errors are around .0028, which tells us that there may be some outliers or influential points, since the residual standard error is not equivalent to MAE.
+
+In short, this example shows that using decision rules for principal components does not necessarily result in the best model. These decision rules are but one approach to model selection.
+
+# Summary and Conclusions
+
+This assignment utilized linear regression and PCA techniques to compare model fit and predictive accuracy of models on stock price data. From the results and commentary provided, we were able to see that the PCA models resulted in slightly better predictive accuracy (as measured by MAE) and also had slightly better fit, as the predictor VIF values were all 1. One of the benfits of using PCA is that all predictors are orthogonal, which is an implicit assumption in linear regression that is not always met.
+
+Moreover, we were able to see that PCA models used less predictors. Another added benefit of PCA is that it can be used to reduce dimensionality, which results in simpler models. An underlying goal of regression is to select a model that most conforms with the Principle of Parsimony. That is, we strive to select a model involves fewer predictors but still has great explanatory power. Through this assignment, we were able to demonstrate this exact principle, as the PCA models had higher MAE values with less variables. 
+
+Lastly, this assignment showed that while there are various decision rules that can be used to determine how many principal components should be retained in the model, these decision rules are not hard and fast. In applying variable selection methods to our data set of PCA scores, we were able to see that backward elimination resulted in a different number and selection of components. Furthermore, the backward elimination model yielded slightly better MAE values than our initial PCA model. This result further helped to demonstrate that modeling is an iterative process and combining multiple techniques together helps to validate which model is truly the best for the business objective.
+
+Although out of scope for this assignment, a reasonable next step in the modeling process is to perform additional model adequacy checking steps on the backward elimination PCA model. All models need to be validated, and this model is no different. While we can say that the backward elimination model is the superior model, we need additional validation that this model appropriately fits our data. One limitation of PCA is that it, like linear regression, is subject to outliers/influential points. We saw that the residual standard errors of the PCA models were different than their MAE values, which tells us that there are potentially some fitted values that are farther away from their actual values relative to other points. This additional validation will help to ensure that the final model selected not only conforms to business goals but also conforms to the assumptions of linear regression.
+
+```{r, renv snapshot,eval=FALSE}
+# final save
+renv::snapshot()
+```
