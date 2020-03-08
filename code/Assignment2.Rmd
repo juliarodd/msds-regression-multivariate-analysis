@@ -8,14 +8,16 @@ output:
   sansfont: Calibri Light
 ---
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message = FALSE)
+# data prep
 library(tidyverse)
-library(rmarkdown)
 library(forcats)
+library(reshape2)
+
+# plotting
 library(gridExtra)
 library(grid)
 library(corrplot)
-library(reshape2)
 library(rockchalk)
 library(scatterplot3d)
 
@@ -23,7 +25,7 @@ library(scatterplot3d)
 cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
 
 # set working directory
-setwd("C:/Users/julia/OneDrive/Documents/Code/jrodd-msds-projects/410_Regression/code")
+setwd("C:/Users/julia/OneDrive/Documents/Code/msds-regression-multivariate-analysis/code")
 ```
 
 # Introduction

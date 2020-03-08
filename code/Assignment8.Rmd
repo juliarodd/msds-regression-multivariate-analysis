@@ -1,0 +1,342 @@
+---
+title: "Julia Rodd Assignment 8"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 2
+---
+
+```{r setup, include=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message=FALSE)
+# data prep
+library(tidyverse)
+library(forcats)
+library(reshape)
+
+# plotting
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(kableExtra)
+library(lattice)
+library(GGally)
+
+# modeling
+library(tidymodels)
+library(car)
+library(cluster)
+library(useful)
+library(Hmisc)
+library(HSAUR2)
+library(MVA)
+library(fpc)
+library(mclust)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/msds-regression-multivariate-analysis/code")
+
+# set seed
+set.seed(123)
+```
+
+# Introduction
+
+This assignment applies cluster analysis to an employment data set, which contains employment percentages in various industry segments for 30 European countries. Initial exploratory data analysis, including scatter plots and principal components analysis, is performed in order to validate that cluster analysis can be used. The two primary cluster analysis techniques used in this assignment are hierarchical clustering and k-means clustering. Ultimately, comparisons are made between these two techniques and final conclusions are provided on the optimal number of clusters to describe the employment data. 
+
+# Results
+
+```{r}
+# reading the data
+my.data <- read.csv(file="../data/EuropeanEmployment.csv",head=TRUE,sep=",")
+
+subdat <- my.data %>%
+  select_if(is.numeric)
+
+```
+
+## Section 1: Exploratory Data Analysis
+
+We begin this assignment by performing some exploratory data analysis. Specifically, we analyze the pairwise scatter plots between the employment rates in the different industry sectors. Our goal is to identify if any relationships demonstrate clear clusters or groupings.
+
+```{r, fig.width=8}
+ggpairs(my.data[,-c(1,2)]) +
+  labs(title="Scatter Plot Matrix")
+```
+
+From this scatter plot matrix, we can observe that the Services (SER) and Finance (FIN) industries have a positive correlation with one another but more importantly, there are 2-3 distinct groupings of points in their relationship. In addition, we can see that the Manufacturing (MAN) industry has clusters in its relationship with other industries (except MIN). Furthermore, we can see that there are no clusters in the relationships with the Mining industry (MIN).
+
+As a next step, we further explore the relationships between SER and FIN and SER and MAN. Although the scatter plot matrix provides some initial insights, this type of view is not all-encompassing. Therefore, we will create more scatter plots but will overlay the country groupings on this plot. This step will help with the initial validation if clusters truly exist, as we are hoping to see clear groupings of countries that do not necessarily align to their group.
+
+```{r,fig.height=5,fig.width=8}
+ser_vs_fin <- my.data %>%
+  ggplot(aes(x=SER, y=FIN, color = Group, label= Country)) + 
+  geom_point() + 
+  geom_text(aes(label=Country),hjust=0, vjust=0) +
+  ggtitle("Financial vs Services") +
+  theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) +
+  guides(color=FALSE)
+
+man_vs_fin <- my.data %>% 
+  ggplot(aes(x=MAN, y=SER, color = Group, label= Country)) + 
+  geom_point() + 
+  geom_text(aes(label=Country),hjust=0, vjust=0) +
+  ggtitle("Services vs Manufacturing") +
+  theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5))
+
+grid.arrange(ser_vs_fin, man_vs_fin, ncol = 2, widths=4:5, top=textGrob("Scatter Plots of Industries with Country Groupings", gp=gpar(fontsize=14, fontface = "bold")))
+
+```
+
+From the scatter plot of Financial vs Services, we see that there are two distinct groupings on the right vs the left of the plot, and one country, Albania, on its own. Moreover, these two large groupings do not align to the groups for each country, as the colors are mixed. 
+
+The scatter plot of Services vs Manufacturing demonstrates a similar trend, as there is a blob of countries in the middle of the plot with various smaller groupings of countries around the blob in the center of the plot. Similarly, the groupings here do not align to the rest of the group. Lastly, the groupings in the two plots also vary, which means that there are many factors that determine a country's group.
+
+From both scatter plots, we can see that we could divide the countries into about 3 groups, which aligns to what we saw from the initial scatter plots above. Even though we can see these clear groupings in the data, utilizing cluster analysis will help to provide a framework for how to group the countries in a way that differs from their pre-existing groups. Therefore, we can continue forward with a cluster analysis, as we have seen from all of these plots that there are groupings of countries that do not align to their out-of-the-box group.
+
+## Section 2: Principal Components Analysis
+
+Although the scatter plot visuals were helpful in initially validating that cluster analysis makes sense, principal components analysis (PCA) is a more effective technique for performing this task. PCA preserves the inherent structure of the data but allows this structure to be viewed in two dimensions. Therefore, we can better understand how many groupings may be logical by taking into account the employment rates from all 9 industries. In this way, PCA is a more all-encompasing tool.
+
+We will create another scatter plot and have color coding by country group, but this time, we will utilize the principal component scores from the first two principal components. Again, we are still hoping to see that some countries are closer together, which would mean that cluster analysis can be performed on this data.
+
+Of note, before generating the principal components, the data is centered and scaled. This step is essential because the ranges in values initally vary by country.
+
+```{r, generate pcs}
+rec <- recipe( ~ ., data = my.data)
+
+pca_trans <- rec %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_pca(all_numeric())
+
+pca_estimates <- prep(pca_trans, training = my.data)
+
+pca_data <- bake(pca_estimates, my.data)
+
+```
+
+```{r, fig.width=8}
+pca_data %>%
+  ggplot(aes(x=PC1, y=PC2, color = Group, label= Country)) + 
+  geom_point() + 
+  geom_text(aes(label=Country),hjust=0, vjust=0) +
+  labs(title = "Scatter Plot of PC1 vs PC2", x="PC1",y="PC2") +
+  theme(plot.title=element_text(lineheight=0.8, face="bold", hjust=0.5)) +
+  guides(color=guide_legend("Group"))
+```
+
+From this PCA visual, we can see right away that there is a distinct blob in the middle left of the plot. This blob is a mix of countries from EFTA, EU, and one country from Other. We can also observe that there are other countries that are close together, such as Romania, USSRF, Bulgaria, etc. in the lower right of the plot as well as Czech/Slovakia, Hungary, Poland, and Turkey at the top of the plot. Furthermore, we can see that some countries are very close together, while other countries are far apart (i.e., Gibraltar), which means that deep exploration will be needed to determine how many clusters best fit this data.
+
+Utilizing PCA to project a data set into 2 dimensions is a vital step in the cluster analysis process, as this step serves as definitive validation if clusters truly exist. We can move forward in applying two cluster analysis techniques: 
+
+* hierarchical clustering, and 
+* k-means clustering.
+
+## Section 3: Hierarchical Clustering Analysis
+
+With hierarchical clustering analysis, we can create a dendrogram, which is akin to a tree. A dendrogram displays the logical groupings present in the data. Below is the dendrogram using the complete method to calculate the distance between the clusters. 
+
+```{r, fig.width=8}
+hier.dist <- dist(subdat)
+# require(maptree)
+hclustmodel <- hclust(hier.dist, method = 'complete')
+plot(hclustmodel,labels=my.data$Country)
+
+```
+
+Although a dendrogram is a visual way to see different clusters within the data, it does not determine the number of clusters that optimally describes the data. Therefore, we will further explore the results of 3 to 6 clusters by computing the between sum of squares percentage (Bet SS). This metric is akin to R-squared and provides some insights into how well the given number of clusters explains the variation in the data. 
+
+We can calculate Bet SS by computing the within sum of squares (WSS) provided by each cut of the dendrogram and subtracting that from the total sum of squares (TSS) to create a percentage. This metric, between sum of squares percentage, will serve as an accuracy metric and help us to determine how many clusters best describe this data.
+
+```{r, hierarchical clustering function}
+hier_clust_function <- function(num_cuts){
+  
+  TSS <- (nrow(subdat)-1)*sum(apply(subdat,2,var))
+  
+  my_tree <- cutree(hclust(hier.dist),num_cuts)
+  
+  WSS <- cluster.stats(hier.dist,my_tree,alt.clustering=NULL)$within.cluster.ss
+  
+  BetSSPer <- paste0(round((TSS-WSS)/TSS*100,2),"%")
+  
+  return(BetSSPer)
+}
+```
+
+
+```{r, hierarchical bet ss}
+BetSSPer_3 <- hier_clust_function(3)
+BetSSPer_4 <- hier_clust_function(4)
+BetSSPer_5 <- hier_clust_function(5)
+BetSSPer_6 <- hier_clust_function(6)
+
+hier_clust_accuracy <- as.data.frame(rbind(BetSSPer_3,BetSSPer_4,BetSSPer_5,BetSSPer_6)) %>%
+  rownames_to_column() %>%
+  mutate(rowname = gsub("BetSSPer_","",rowname)) %>%
+  dplyr::rename(`Between SS Percent`=2)
+
+kable(hier_clust_accuracy, "html", align = 'l', booktabs = T, row.names = F) %>%
+  kable_styling(full_width = F, position = "center") %>%
+  add_header_above(c("Hierarchical Results" = 2))
+
+```
+From this table, we can see that as the number of clusters increases, then the between SS percentage also increases. We can also think of this pattern as when the number of clusters increases, the within sum of squares decreases, which means that the clusters better fit the data. Furthermore, we can see that 6 clusters seems to fit the data best as it has an accuracy metric that is highest at `r BetSSPer_6`. 
+
+## Section 4: k-Means Clustering Analysis
+
+We continue our cluster analysis by utilizing a different technique, k-means clustering. We will perform the clustering using 3 to 6 clusters and compare the results to the hierarchical clsutering method. The accuracy for each number of clusters is computed in a similar fashion to the results from section 3, where we show the between sum of squares percentage.
+
+```{r, kmeans function}
+kmeans_function <- function(num_clusters){
+  
+  my_model <- kmeans(subdat,num_clusters)
+  
+  BetSS <- my_model$betweenss/my_model$totss
+  
+  BetSSPer <- paste0(round(BetSS*100,2),"%")
+  
+  return(list(my_model,BetSSPer))
+}
+
+```
+
+```{r, run kmeans}
+kmeans_3 <- kmeans_function(3)
+kmeans_4 <- kmeans_function(4)
+kmeans_5 <- kmeans_function(5)
+kmeans_6 <- kmeans_function(6)
+```
+
+```{r,k-means results}
+kmeans_BetSSPer_3 <- kmeans_3[[2]]
+kmeans_BetSSPer_4 <- kmeans_4[[2]]
+kmeans_BetSSPer_5 <- kmeans_5[[2]]
+kmeans_BetSSPer_6 <- kmeans_6[[2]]
+
+kmean_clust_accuracy <- as.data.frame(rbind(kmeans_BetSSPer_3,kmeans_BetSSPer_4,kmeans_BetSSPer_5,kmeans_BetSSPer_6)) %>%
+  rownames_to_column() %>%
+  mutate(rowname = gsub("kmeans_BetSSPer_","",rowname)) %>%
+  dplyr::rename(`k-Means`=2) %>%
+  # cheating b/c know want to deslect this for frame below
+  select(-rowname)
+
+# combine results to allow for easy comparison
+total_clust_accuracy <- cbind(hier_clust_accuracy,kmean_clust_accuracy) %>%
+  dplyr::rename(Clusters=rowname, Hierarchical=2)
+
+kable(total_clust_accuracy, "html", align = 'l', booktabs = T, row.names = F) %>%
+  kable_styling(full_width = F, position = "center") %>%
+  add_header_above(c("Hierarchical and k-Means Results" = 3))
+```
+
+From the table above, we can see that similar to the hierarchical clustering method, k-means shows that 6 clusters yields the highest between sum of squares percentage at `r kmeans_BetSSPer_6`. 
+
+Both methods show a big jump in performance from cluster 3 and cluster 4 as well as cluster 4 and cluster 5. However, for both methods, 6 clusters show the highest Bet SS percentage. Therefore, it seems that both methods point to a 6-cluster solution as being the more optimal solution.
+
+We can expand upon the fit of the clusters using k-means by plotting each result and observing the fit using the first two principal components. In cluster analysis, validating that the cluster solution fits the data well is an important step in helping to decide how many clusters is appropriate. Specifically with k-means, this task is easy with R, as we can can readily plot the cluster results.
+
+```{r, kmeans plot}
+kmeans_plot <- function(model,mytitle){
+  plot(model[[1]], data=subdat) + 
+    ggtitle(mytitle) + 
+    guides(color=FALSE) + 
+    theme(plot.title = element_text(size = 10, face = "bold")) + 
+    theme(axis.title = element_text(size = 8))
+}
+```
+
+
+```{r,fig.width=8}
+#graphically show k-means results
+kmeans_3_plot <- kmeans_plot(kmeans_3,"3 Clusters")
+
+kmeans_4_plot <- kmeans_plot(kmeans_4,"4 Clusters")
+
+kmeans_5_plot <- kmeans_plot(kmeans_5,"5 Clusters")
+
+kmeans_6_plot <- kmeans_plot(kmeans_6,"6 Clusters")
+
+grid.arrange(kmeans_3_plot,kmeans_4_plot,kmeans_5_plot,kmeans_6_plot,
+             ncol=2,
+             top=textGrob("k-Means Cluster Results", 
+                          gp=gpar(fontsize=14, fontface = "bold")))
+
+```
+
+We can visually see that in the 3-cluster k-means solution, the point on the far right is grouped with the two points in the bottom center of the plot. This observation speaks to why the between sum of squares percent is lower for the 3-cluster solution relative to other solutions. 
+
+Furthermore, we can see that in the 4-cluster solution, there is a different separation of the points, as the point on far right is grouped with the point that is closer to it. The 5-cluster solution expands upon the 4-cluster solution but breaks the blob of points toward the left of the plot into more clusters. Finally, we can see that the 6-cluster solution is very similar to the 5-cluster solution, except that the points toward the far right are separated into their own clusters.
+
+In short, in visually viewing the clusters in a 2-dimensional space (through the assistance of PCA), we can see that the 3-cluster solution seems to underfit the data and has the largest within sum of squares, while the 6-cluster solution seems to provide little gain (and not to mention, it creates clusters of single countries). It now appears that either the 4-cluster or 5-cluster solution may fit the data best. We will expand upon this conclusion in the next section.
+
+## Section 5: Determining the Optimal Number of Clusters
+ 
+In cluster analysis, using the heuristical techniques of hierarchical clustering and k-means clustering, determining the optimal number of clusters is a challenging task. Both methods do not clearly determine which number of clusters fits the data best. Therefore, we will present a different view of each method by iterating through solutions for 1 to 15 clusters and plotting the within sum of squares and between sum of squares. The optimal solution should minimize the within sum of squares and maximize the between sum of squares. 
+
+Moreover, it will be important to keep the principle of parsimony in mind when we are evaluating the below results. While we are striving for a solution that minimizes the within sum of squares and maximizes the between sum of squares, we are also looking for a solution that does this with the fewest number of clusters.
+
+```{r,iterate thru clust solns, fig.height=5, fig.width=8, results='hide'}
+# Hierarchical clustering
+hier_wssplot <- function(subdat, nc=15, seed=1234) {
+  wss <- (nrow(subdat)-1)*sum(apply(subdat,2,var))
+  
+  for (i in 2:nc) {
+    require(fpc)
+    set.seed(seed)
+    hier.dist <- dist(subdat)
+    complete3 <- cutree(hclust(hier.dist),i)
+  wss[i] <- cluster.stats(hier.dist,complete3, alt.clustering=NULL)$within.cluster.ss}
+  
+  rs <- (wss[1] - wss)/wss[1]
+  
+  p1 <- plot(1:nc, wss, type="b", xlab="Number of Clusters",
+       ylab="Within Groups SS", main="Hierarchical",col=cbPalette[2])
+    
+  p2 <- plot(1:nc, rs, type="b", xlab="Number of Clusters",
+         ylab="% of Between SS",main="Hierarchical",col=cbPalette[6])
+  
+  return(list(p1,p2))
+}
+
+# k-means clustering
+kmeans_wssplot <- function(subdat, nc=15, seed=1234) {
+  wss <- (nrow(subdat)-1)*sum(apply(subdat,2,var))
+  
+  for (i in 2:nc) {
+    set.seed(seed)
+    wss[i] <- sum(kmeans(subdat, centers=i)$withinss)}
+    rs <- (wss[1] - wss)/wss[1]
+    
+    p1 <- plot(1:nc, wss, type="b", xlab="Number of Clusters",
+         ylab="Within Groups SS",main="k-Means",col=cbPalette[2])
+    
+    p2 <- plot(1:nc, rs, type="b", xlab="Number of Clusters",
+       ylab="% of Between SS",main="k-Means",col=cbPalette[6])
+    
+    return(list(p1,p2))
+    
+} 
+
+par(mfrow=c(2,2))
+hier_wssplot(subdat)
+kmeans_wssplot(subdat)
+```
+
+Even though for both hierarchical and k-Means clustering methods 14 clusters has the smallest within group sum of squares and the maximum percentage of between groups sum of squares, 14 clusters does not seem to be the optimal solution. 
+
+Generally, we look for an elbow in each of these graphs to determine the largest jump, but from these plots, there are no elbows. We can see that as the number of clusters increases, the within group SS decreases and the % between SS increases.
+
+However, we can see clear tapering for both types of plots as the number of clusters increases. This observation means that there is little benefit of increasing the number of clusters after 5 clusters for both hierarchical and k-means clustering. Therefore, these plots help to validate that 4 or 5 clusters seems to be the optimal number of clusters. Because the 5-cluster solution has a smaller within SS and a higher % for between SS, we will select 5 clusters as our optimal solution.
+
+# Summary and Conclusions
+
+Through this assignment, we were able to utilize several techniques of cluster analysis and combine them with others to evaluate the appropriate number of clusters to describe our employment data. Both hierarchical clustering and k-means clustering are heuristic methods, which means that they require a trial and error process to determine the optimal number of clusters. The 'best' solution is not readily apparent from either of these methods on their own, but more information is gained when they are used together.
+
+Furthermore, this assignment showed the benefit of using PCA in a cluster analysis problem. PCA was utilized up front to validate if there were clear groupings of countries. Then, after different cluster solutions were developed, PCA was used to provide insights into the overall fit of each cluster solution. Through this process, we were able to develop insights on solutions that underfit or overfit the data. PCA is an extremely powerful tool, as it preserves the inherent structure of the data and allows this information to be viewed in two dimensions. In contrast, scatter plots only take into account two variables. In short, PCA is all-encompasing and enables stronger conclusions to be made about which cluster solution is best. PCA can be used throughout the cluster analysis process to validate that the conclusions drawn are appropriate.
+
+Lastly, we were able to compare and contrast the results of both clustering methods by using within sum of squares and between sum of squares metrics. The goal of a clustering solution is to minimize the within sum of squares and maximize the between sum of squares using as few clusters as possible. While 4 or 5 clusters are both valid solutions for this employment data, the 5 cluster solution is superior as it performs better on both of these metrics.
+
+All in all, cluster analysis provides a powerful method for grouping data into groups that may not align to groups selected a priori. In this way, it is an exploratory technique that can be used to think of data in a different way. Even though the techniques shown in this assignment are more heuristic in nature, it is clear that utilizing many methods together and performing validation along the way both help ensure that the final conclusions made are appropriate.

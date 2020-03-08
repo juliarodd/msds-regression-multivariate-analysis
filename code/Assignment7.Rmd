@@ -1,0 +1,272 @@
+---
+title: "Julia Rodd Assignment 7"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message=FALSE)
+# data prep
+library(tidyverse)
+library(forcats)
+library(reshape)
+
+# plotting
+library(gridExtra)
+library(grid)
+library(ggrepel) # for labels in ggplot2
+library(corrplot)
+library(kableExtra)
+
+# modeling
+library(rockchalk)
+library(car)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/msds-regression-multivariate-analysis/code")
+
+# set seed
+set.seed(334)
+```
+
+# Introduction
+
+This assignment explores the concept of factor analysis by using the correlation matrix results of a study on liquor preferences. This study, taken from 'A Factor Analysis of Liquor Preference' by Stoetzel (Journal of Marketing Research), involves 1,442 complete interviews of French citizens who were asked to rank their preferences of nine liquors. Both orthogonal and oblique rotation methods are applied to this data, with comparisons made between both rotational methods and the results from Stoezel. Final thoughts are provided on the goodness of fit of these rotational methods relative to the original correlation matrix.
+
+# Results
+
+```{r}
+# data prep
+# this is manual entry b/c we are recreating a study
+cor.values <- c(1.000,0.210,0.370,-0.32,0.000,-0.31,-0.26,0.090,-0.38,
+		0.210,1.000,0.090,-0.29,0.120,-0.30,-0.14,0.010,-0.39,
+		0.370,0.090,1.000,-0.31,-0.04,-0.30,-0.11,0.120,-0.39,
+		-0.32,-0.29,-0.31,1.00,-0.16,0.25,-0.13,-0.14,0.900,
+		0.00,0.120,-0.04,-0.16,1.000,-0.20,-0.03,-0.08,-0.38,
+		-0.31,-0.30,-0.30,0.25,-0.20,1.000,-0.24,-0.16,0.180,
+		-0.26,-0.14,-0.11,-0.13,-0.03,-0.24,1.000,-0.20,0.040,
+		0.090,0.010,0.120,-0.14,-0.08,-0.16,-0.20,1.000,-0.24,
+		-0.38,-0.39,-0.39,0.900,-0.38,0.180,0.040,-0.24,1.000)
+
+# change to matrix
+cor.matrix <- matrix(cor.values,nrow=9,ncol=9,byrow=TRUE)
+
+# change to data frame
+cordf <- cor.matrix %>%
+  as_tibble() %>%
+  dplyr::rename(Arm = V1,
+         Cal = V2,
+         Cog = V3,
+         Kir = V4,
+         Mar = V5,
+         Mir = V6,
+         Rum = V7,
+         Whi = V8,
+         Liq = V9)
+
+```
+
+## Section 1: Varimax Rotation
+
+We begin this assignment by analzying the results of the orthogonal rotation method, varimax. Below is a table of the factor loadings, which in factor analysis, are treated like regression coefficients. Since the orthogonal rotation method imposes the constraint of having orthogonal (uncorrelated) factors, we can also consider the loadings to be the correlations between the factors and the nine measured variables (liquors). Orthogonal rotation methods are generally easier to interpret than oblique rotation methods, so we will be most interested in validating the interpretability of our results.
+
+```{r, varimax rotation function}
+varimax_rotation <- function(num_factors){
+  factanal(covmat=cor.matrix, n.obs=1442, factors=num_factors, rotation='varimax')
+}
+```
+
+
+```{r, 3 factor varimax, comment=NA}
+f.3 <- varimax_rotation(3)
+
+# use comment=NA to hide the '#' upon printing
+f.3$loadings
+```
+
+In applying the varimax rotation method and comparing the loadings to Stoezel, we see that we do not get the same factor loadings as Stoezel. While Stoezel mentions that "the factors [are] mathematically independent" (p. 11), he does not specifically mention which rotation method he used. 
+
+Therefore, without this information we cannot reproduce his results, as the factor loadings are dependent on the rotation method as well as the number of factors. A trial and error process to determine which method Stoezel applied is out of scope for this assignment.
+
+While the numeric results bove not match the results of Stoezel, we can still justify the qualitative results, or the interpretation of the factors, to match Stoezel. 
+
+We can see that Factor 1 has two variables with high postive correlations (variables 4 and 9) and three variables with moderately strong negative correlations (variables 1-3). Therefore, we can see that Factor 1 matches the difference that Stoezel describes as "strong vs sweet" (p. 9). 
+
+In Factor 2, only variable 5 has a pronounced pattern, with a strong postive correlation of .996. Since variable 5 is Rum, we further validate that this result aligns to Stoezel, since Factor 2 is representative of (in)expensiveness. 
+
+Lastly, we can see that Factor 3 has only one pronounced relationship with varible 6, as demonstrated by the strong negative correlation of -.938. Like Factor 1, both Factors 2 and 3 have a mix of positive and negative correlations. Therefore, we interpet all factors in terms of these differences. Factor 3, like Stoezel, matches the assessment of regional differences.
+
+However, there is one critical point to make: the interpretation of the factors is completely subjective. That is, the factor loadings themselves could be interpreted in a variety of ways. While we can justify Stoezel's interpretation through our factor loadings, we could form different conclusions of what each of the factors represent. For example, without prior knowledge of Stoezel's interpretation, we could hypothetically deduce that Factor 1 is driven by time of day or when consumers like to enjoy each liquor. 
+
+Because the factor loadings are dependent on the number of factors used and the rotation method applied, we cannot expect to get the same numeric results if these two components are not equal. In short, the factor loadings are unique.
+
+In addition, even though we could interpret the loadings in the same manner as Stoezel, the interpretation of the factors is also subjective. Therefore, the reproducability of factor analysis can be difficult, as there are a variety of factors that impact the end result.
+
+Using the MLE method, which requires a normality assumption, we can use hypothesis testing to determine if 3 factors is appropriate. It is worth nothing that the selection of 3 factors was an artibrary selection to produce the above results.
+
+We can write our hypotheses as follows:
+
+* H~0~: 3 factors are sufficient
+* H~A~: More factors are needed
+
+From this hypothesis test, we have a chi square statistic of `r round(f.3$STATISTIC[[1]],2)` (on `r f.3$dof` degrees of freedom) with a p-value of `r f.3$PVAL[[1]]`. Therefore, we reject the null hypothesis and conclude that additional factors are needed to describe this data. 
+
+## Section 2: Optimal Number of Factors
+
+In this section, we expand upon the results of the previous section by comparing the results of using 1 through 6 factors, with a goal of trying to determine the optimal number of factors. We can assess the chi square test statistic and p-value, which provide insight into the optimal number of factors.
+
+```{r, more varimax rotations}
+f.1 <- varimax_rotation(1)
+f.2 <- varimax_rotation(2)
+f.4 <- varimax_rotation(4)
+f.5 <- varimax_rotation(5)
+# f.6 <- varimax_rotation(6)
+```
+
+In interating through the varimax rotation method with 1 through 6 factors, we get an error when using 6 factors that "6 factors are too many for 9 variables." We surmise that this error occurs since there are not enough variables to appropriately distinguish these 6 factors from one another without any correlation.
+
+Comparing the hypothesis tests for each number of factors, the results are inconclusive, as each factor model has a significant p-value. 
+
+For instance, with a 5-factor model, the chi square statistic is `r round(f.5$STATISTIC[[1]],2)` (on `r f.5$dof` degree of freedom), which yields a p-value of about 0 (or, `r f.5$PVAL[[1]]`). Therefore, we reject the null hypothesis that 5 factors are sufficient and conclude that there is no optimal number of factors to describe this data set.
+
+If we take a closer look at the 5-factor model, from the scree plot below, we can see that the total variance with 5-factors is below the desired 80% or higher cutoff point.
+
+```{r, scree plot, fig.height=5, fig.width=14}
+# for the proportion var
+f.5_var <- round(colSums(f.5$loading*f.5$loading)/dim(f.5$loading)[1],3)  
+# to get the cumulative Var values
+f.5_cumvar <- round(cumsum(colSums(f.5$loading*f.5$loading)/dim(f.5$loading)[1]),3) 
+Factor <- c(1,2,3,4,5)
+f.5_totalvar <- data.frame(Factor=Factor,Proportion_Var=f.5_var,Cumulative_Var=f.5_cumvar)
+
+f.5_totalvar %>%
+  ggplot(aes(x=Factor)) +
+  geom_line(aes(y=Proportion_Var, colour=cbPalette[6]),size=1) + 
+  geom_point(aes(y=Proportion_Var, colour=cbPalette[6]),size=2) +
+  geom_line(aes(y=Cumulative_Var, colour=cbPalette[7]),size=1) + 
+  geom_point(aes(y=Cumulative_Var, colour=cbPalette[7]),size=2) +
+  geom_hline(yintercept=.8) +
+  geom_text(aes(x = 3, y = .82,label = "80% line"), size=3) +
+  scale_color_manual(values=cbPalette[6:7], labels=c("Individual Variance","Total Variance")) +
+  labs(title="Scree Plot with Total Variance Explained", x="Number of Components",y="Percent") +
+  scale_y_continuous(labels=scales::percent) +
+  guides(colour=guide_legend("Legend")) + 
+  theme(text = element_text(size = 10, face = "bold")) 
+
+```
+
+This scree plot helps to demonstrate that even the 5-factor model, which should explain a higher amount of variance relative to models with less factors, does not even adequately account for a 'significant' amount of variation in the data. In fact, the total variation is just below 70%.
+
+Moreover, in analyzing the Uniqueness component within each model, we can readily see that the Uniqueness demonstrates a distinct pattern. Specifically, some variables have a very high variance (> .60), while other variables have a very low variance (<.01). Because factor analysis seeks to find the common variance among a set of measured variables, the fact that some variables demonstrate high unique variances distills the overall factor solution, as there is little common variance that can be found among all the variables.
+
+In short, while the results of the hypothesis testing are inconclusive and further supported by polarized unique variances, if we had to select a number of factors, we would select the 5-factor model, as it explains the greatest total variance in the data. Leveraging a different decision rule might lead to a different result for how many factors to include.
+
+## Section 3: Promax Rotation
+
+In this section, we explore the results of a 3-factor model using the oblique rotation method, promax. Oblique rotation methods do not impose the constraint of independence on the factors, so the factors are not bounded to [-1,1]. Therefore, the factor loadings are different than the correlation coefficients. We will compare the results of this model to the varimax method.
+
+```{r, promax rotation function}
+promax_rotation <- function(num_factors){
+  factanal(covmat=cor.matrix, n.obs=1442, factors=num_factors, rotation='promax')
+}
+```
+
+
+```{r, comment=NA}
+g.3 <- promax_rotation(3)
+
+# again, use comment=NA to hide the '#' upon printing
+g.3$loadings
+
+# g.4 <- promax_rotation(4)
+# g.5 <- promax_rotation(5)
+```
+
+We first note that there are loadings beyond 1, which can occur with oblique rotation methods.
+
+Additionally, we can see that Factor 1 demonstrates the same pattern as the varimax method, with high positive loadings on variables 4 and 9 and largely low/moderately low loadings on the remaining variables. However, the patterns become less distinct when analyzing Factors 2 and 3. We can see that there is still some polarization of values, but overall the loadings with this rotation method are less clear than the orthogonal rotation method, varimax. 
+
+As a brief comparison between the two rotation methods, when we plot Factors 1 and 2, we can see below that the x-values (Factor 1) appear to be farily equal between the two methods. In contrast, we can see a big difference in the y-values (Factor 2) between the two methods. It is almost as if the signs have completely switched.
+
+```{r, fig.height=5, fig.width=14}
+# reference
+loadings_var1 <- f.3$loadings[1,]
+communality_var1 <- sum(loadings_var1^2);
+
+f.3load <- data.frame(f.3$loadings[,1:2])
+g.3load <- data.frame(g.3$loadings[,1:2])
+
+f.3load_plot <- f.3load %>%
+  ggplot(aes(x=Factor1,y=Factor2, fill = names(cordf))) +
+  geom_point() + 
+  geom_label_repel(aes(label=names(cordf))) +
+  labs(title="Varimax Rotation Method", x = "", y = "Factor 2") +
+  scale_fill_manual(values=cbPalette) +
+  guides(fill=FALSE)
+
+g.3load_plot <- g.3load %>%
+  ggplot(aes(x=Factor1,y=Factor2, fill = names(cordf))) +
+  geom_point() + 
+  geom_label_repel(aes(label=names(cordf))) +
+  labs(title="Promax Rotation Method", x = "", y = "") +
+  scale_fill_manual(values=cbPalette) +
+  guides(fill=FALSE)
+
+grid.arrange(f.3load_plot,g.3load_plot, ncol=2, top=textGrob("Three Factor Models", gp=gpar(fontsize=12, fontface = "bold")), bottom=textGrob("Factor 1", gp=gpar(fontsize=12, fontface = "bold")))
+
+```
+
+One benefit of oblique rotation is that the patterns in the loadings will become very clear if the factors are correlated. However, in our case, the patterns seem to be more clear with the varimax method.
+
+## Section 4: Goodness of Fit
+
+In this section, we assess the goodness of fit of each of our rotation methods. Specifically, we will calculate the mean absolute error. This approach is but another method of determining the suitability of one rotation method over the other.
+
+We can calculate the mean absolute error by reconstructing the correlation matrix using the loadings and the formula for factor analysis. The factor analysis equation is the loading matrix times the transpose of the loading matrix plus the unique variance explained by each measured variable (in matrix form). The end result is a 9 x 9 matrix. Therefore, we can readily use the loadings and uniqueness calculated above to approximate the correlation matrix and then compare our results to the original correlation matrix of liquor preferences. 
+
+Below is a table of the MAE values for each rotation method.
+
+```{r, mae calc}
+mae_calc <- function(model){
+  m <- model
+  lamda <- m$loadings
+  # dim(lamda) 9x3
+  approx <- lamda%*%t(lamda) + diag(m$uniqueness) 
+  # dim(approx) 9x9
+  mae <- mean(abs(approx-cor.matrix)) # estimated vs actual correlations
+  return(mae)
+}
+```
+
+
+```{r, show mae results}
+mae.f3 <- mae_calc(f.3)
+
+mae.g3 <- mae_calc(g.3)
+
+mae <- round(cbind(mae.f3, mae.g3),4)
+
+kable(mae, "html", col.names=c("Varimax","Promax"), align = 'l',row.names = FALSE) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("MAE Values" = 2))
+
+```
+
+Overall, we can see that the varimax method yields a smaller MAE value (~`r round(mae.f3,2)`) than the promax method (~`r round(mae.g3,2)`). Therefore, we can conclude that the varimax rotation method is superior to the promax rotation method as it has a smaller mean deviation, which means that the varimax method beter approximates the original correlation matrix.
+
+# Summary and Conclusions
+
+In this assignment, we explored the concept of factor analysis using the correlation matrix provided by a study of liquor prefences in France. We compared and contrasted the results of the factor loadings (regression coefficients) between the orthogonal rotation method, varimax, and the oblique rotation method, promax. We were able to see that both methods demonstrated polarized loadings but the signs of their values were drastically different. In short, the varimax method presented a more clear interpretation of the factor loadings. 
+
+Furthermore, we were able to demonstrate that the interpreation of the factor loadings is subjective. Although we could justify the findings of Stoezel, we can derive different conclusions from the same/similar numerical results. This point is but one potential limitation of factor analysis, as the categorization of the factors themselves varies by individual. Also, the factor loadings from the varimax method were close to Stoezel but did not completely align, as we were not privy to the specific rotation method that he used up front in our analysis. Therefore, we could easily reproduce his results nor derive the exact same conclusions. Both of these points are important considerations when using factor analysis.
+
+In addition, we sought to determine the optimal number of factors and compared the results using 1-6 factors. Although a 6-factor model for 9 variables is not possible, the results were inconclusive. The 5-factor models (for both rotation methods, but the promax results were not shown) yielded low p-values, which meant that 5 factors were not sufficient. This result may be due to the large unique variances demonstrated by a handful of variables. Since factor analysis seeks to explain the common variance shared among measured variables, with high uniqueness values, this task becomes more challenging.
+
+Lastly, we evaluated the goodness of fit of both rotation methods by using their matrix loadings and uniqueness values to reconstruct the original correlation matrix. The varimax rotation gave a smaller MAE value, which meant that it better approximated the original correlation matrix of liquor preferences.
+
+Through this assignment, we were better able to demonstrate that the number of factors and the rotation method used can greatly impact the overall results of factor analysis. In this way, it is important to test out many different combinations to determine the optimal number of factors, which will hopefully explain the greatest amount of variance in the data. Lastly, we were also able to show that the interpretation of the factors is a subjective process. Having visibility into the business goals and gaining business context before performing factor analysis is a critical step to ensure that the end results are meaningful.
