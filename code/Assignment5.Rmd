@@ -1,0 +1,700 @@
+---
+title: "Julia Rodd Assignment 5"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message = FALSE)
+options(scipen = 999)
+# data prep
+library(tidyverse)
+library(forcats)
+library(reshape)
+# library(naniar) # missing_var_summary()
+
+# visualization
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(kableExtra)
+
+# modeling
+install.packages("miscTools") # had to include this b/c kept getting rmarkdown error that miscTools could not be found
+library(miscTools) # to calculate adj rsq on test set
+library(tidymodels)
+library(recipes)
+library(rockchalk)
+library(car)
+
+# other
+library(rmarkdown)
+
+# define custom color palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000", "#D2691E")
+
+# set working directory
+setwd("C:/Users/julia/OneDrive/Documents/Code/msds-regression-multivariate-analysis/code")
+
+# Set the seed for train/test split
+set.seed(123)
+
+```
+
+# Introduction
+
+This assignment uses housing data from Ames, IA from 2006 - 2010 and expands upon the analyses drawn from previous assignments. The overall goal of this assignment is to utilize variable selection methods to predict the raw sale price of a home. During this process, the data is split into training and testing sets with commentary provided on the fit and accuracy of the chosen models. Ultimately, one model is selected, and there is discussion on the challenges posed with the given results. Various R packages are used in this assigmemnt, including dplyr, MASS, car, kableExtra, and stargazer.
+
+# Results
+
+```{r}
+#read in our data
+ames <- read.csv(file="../data/ames_housing_data.csv",head=TRUE,sep=",")
+#str(ames)
+
+# define additional variables
+ames_clean <- ames %>%
+  mutate(TotalFloorSF = FirstFlrSF + SecondFlrSF,
+         HouseAge = YrSold - YearBuilt,
+         QualityIndex = OverallQual * OverallCond,
+         logSalePrice = log(SalePrice),
+         PriceSqFt = SalePrice/TotalFloorSF,
+         TotalSqftCalc = BsmtFinSF1+BsmtFinSF2+GrLivArea)
+```
+
+## Section 1: Define the Sample Data Population
+
+As a first step in our modeling process, we define the scope of houses under study. Because we are seeking to build a regression model to predict SalePrice, not all houses are the same. Therefore, we will limit our study to include only single family homes (BldgType == "1Fam"). The majority of the homes in this data set are single family homes, so we reduce some variability in SalePrice by eliminating other building types.
+
+Additionally, since we are creating a regression model, we need to be cognizant that we have a wide range in SalePrice. Rather than move forward, we elect to remove homes that have a SalePrice > $490,000 which is more than 3 * IQR. This step removes 19 homes, but in order to increase the accuracy of our model, we only want to include homes that are typical for Ames, IA. 
+
+In summary, we will create a regression model for typical Ames homes. Our drop conditions are:
+
+1. Single family homes (BldgType == "1Fam");
+2. Homes with a SalePrice < $490,000 (SalePrice < 490000)
+
+Our data set now includes 2,406 homes, as we removed 524 homes applying the above drop conditions.
+
+```{r,define our subset}
+ames_subdat <- ames_clean %>%
+  filter(BldgType == "1Fam" & SalePrice < 490000) %>%
+  mutate(OverallQual = as.factor(OverallQual),
+         OverallQual = fct_recode(OverallQual,
+                                  "Very Poor"="1",
+                                  "Poor"="2",
+                                  "Fair"="3",
+                                  "Below Average"="4", 
+                                  "Average"="5", 
+                                  "Above Average"="6",
+                                  "Good"="7",
+                                  "Very Good"="8",
+                                  "Excellent"="9",
+                                  "Very Excellent"="10"))
+```
+
+## Section 2: The Predictive Modeling Framework
+
+Before we begin creating our regression model, we will split our data into training and testing sets. This process will enable us to enhance the validation of our model. With a testing set, we will be able to apply the selected model from our training set to determine how well it predicts the sale price of a given home.
+
+We will use a uniform random number to split our data set 70/30 into the training and testing sets.
+
+```{r, train test split}
+# check to see if there are missing vals
+# ames_subdat %>% 
+#   miss_var_summary()
+
+ames_split <- initial_split(ames_subdat, prop = 0.70)
+
+train.df <- training(ames_split) 
+
+test.df <- testing(ames_split)
+```
+
+Below is a table that shows the number of observations (homes) in our training and testing sets. We can see that by adding these two data sets together, we get the total number of observations in our data set, 2,406.
+
+```{r}
+text_tbl <- data.frame(
+  Data = c("train.df", "test.df", "Total"),
+  Observations = c(nrow(train.df), nrow(test.df), nrow(train.df)+nrow(test.df)))
+
+kable(text_tbl, "latex", align='l', col.names=c("Data Set", "Number of Observations")) %>%
+  kable_styling(full_width = F, position = "left")
+```
+
+## Section 3: Model Identification by Automated Variable Selection
+
+In this section, we will create various regression models using these variable selection methods: forward selection, backward elimination, and the stepwise method.
+
+First, we create a set of candidate predictor variables. These variables were selected because they either have a strong correlation with SalePrice or they demonstrate variability in SalePrice at different levels. For each categorical variable selected, validation was also done to ensure that there was a spread of homes across categories. A mix of continuous and categorical variables were selected. Below is a table of the candidate predictor variables along with their data type.
+
+```{r}
+# this isn't pretty but it is for illustrative purposes
+text_tbl <- data.frame(
+  Predictor = c("TotalFloorSF", "HouseAge", "QualityIndex", "OverallQual", "Neighborhood", "LotShape", "HouseStyle", "TotalBsmtSF", "KitchenQual", "FullBath", "BedroomAbvGr", "TotalSqftCalc", "Exterior1", "Foundation", "GarageArea"),
+  Type = c("Continuous","Continuous","Continuous","Categorical","Categorical","Categorical","Categorical","Continuous","Categorical","Continuous","Continuous","Continuous","Categorical","Categorical","Continuous"))
+
+kable(text_tbl, "latex", align='l', col.names=c("Predictor", "Data Type")) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("Candidate Predictors" = 2))
+```
+
+```{r, train test clean}
+vars_in_scope <- c("SalePrice", "TotalFloorSF", "HouseAge", "QualityIndex", "OverallQual", "Neighborhood", "LotShape", "HouseStyle", "TotalBsmtSF", "KitchenQual", "FullBath", "BedroomAbvGr", "TotalSqftCalc", "Exterior1", "Foundation", "GarageArea")
+
+train.df <- train.df %>%
+  dplyr::select(vars_in_scope)
+
+test.df <- test.df %>%
+  dplyr::select(vars_in_scope)
+
+# this removes two rows - 1 in each set
+# have to do this here b/c otherwise, removes all rows since most have a missing value
+# here, we do the subset of cols so it's less commonplace to have a missing val
+train.df <- na.omit(train.df)
+test.df <- na.omit(test.df) 
+
+# we don't have this in training so need to remove it from test set
+test.df <- test.df %>%
+  filter(!(Exterior1 %in% c("PreCast","ImStucc")))
+
+# check - need to make sure there are no levels in test that aren't in train
+# table(train.df$Exterior1)
+# table(test.df$Exterior1)
+
+```
+
+Of note, there are two homes with missing values. These homes will be excluded from our data sets, as we need complete data to successfully build and test our model. Therefore, our training data frame is reduced to 1690 observations, since these two homes were only in the training data set.
+
+We are now ready to compute our regression models using our variable selection methods.
+
+```{r, stepwise function, include=FALSE}
+# know tidymodels has a better framework but not sure how to implement stepwise regression on it
+
+library(MASS)
+
+stepwise_function <- function(dat){
+  # Define the upper model as the FULL model
+  upper.lm <- lm(SalePrice ~ .,data=dat)
+  
+  # Define the lower model as the Intercept model
+  lower.lm <- lm(SalePrice ~ 1,data=dat)
+  
+  # Need a SLR to initialize stepwise selection
+  sqft.lm <- lm(SalePrice ~ TotalSqftCalc,data=dat)
+  # Call stepAIC() for variable selection
+  
+  forward.lm <- stepAIC(object=lower.lm,scope=list(upper=upper.lm,lower=lower.lm),
+                        direction=c('forward'))
+  
+  backward.lm <- stepAIC(object=upper.lm,direction=c('backward'))
+  
+  stepwise.lm <- stepAIC(object=sqft.lm,scope=list(upper=formula(upper.lm),lower=~1),
+                         direction=c('both'))
+  
+  junk.lm <- lm(SalePrice ~ HouseAge + Foundation, data=dat)
+  
+  return(list(forward.lm,backward.lm,stepwise.lm,junk.lm))
+
+}
+```
+
+```{r, run1, include=FALSE}
+run1 <- stepwise_function(train.df)
+```
+
+Before we share and compare model results, we calculate the VIF for each of our models to ensure we do not have multicollinearity issues with the predictors selected.
+
+```{r, run1 vif}
+# vif(run1[[1]])
+# vif(run1[[2]])
+# vif(run1[[3]])
+# vif(run1[[4]])
+```
+
+Unfortunately, the Neighborhood variable has a VIF of 50-100+ within each model and OverallQual has a VIF of 20+. It is worth noting that every method selected these 2 variables, as these methods generally favor variables that are highly correlated. Therefore, we will re-run our variable selection methods without Neighborhood and OverallQual in the pool of predictors.
+
+```{r,run2, include=FALSE}
+# we remove the Neighborhood variable since it has an extremely high VIF
+# also remove overallqual since it has a VIF in the 20s
+train_sub <- train.df %>%
+  dplyr::select(-Neighborhood,-OverallQual)
+
+run2 <- stepwise_function(train_sub)
+
+```
+
+```{r, mae calc function}
+mae_calc <- function(model,dat){
+  # first, generate predictions
+  pred_df <- as.data.frame(predict(model,dat)) %>%
+    dplyr::rename(pred=1)
+  
+  if(!grepl("log",deparse(substitute(model)))){
+  # lay the groundwork to calculate MAE
+  new_dat <- dat %>%
+    mutate(pred = pred_df$pred,
+           res = SalePrice - pred,
+           absres = abs(res))
+  } else {
+     new_dat <- dat %>%
+       mutate(pred = pred_df$pred,
+              res = logSalePrice - pred,
+              absres = abs(res))
+  }
+  
+  # then we calculate mean absolute error
+  MAE <- mean(new_dat$absres)
+  
+  return(MAE)
+}
+```
+
+
+```{r, compute MAE for run2}
+# first, define models - makes it easier to call them
+forward_m2 <- run2[[1]]
+backward_m2 <- run2[[2]]
+stepwise_m2 <- run2[[3]]
+junk_m <- run2[[4]]
+
+# calculate mae using function
+MAE_forward <- mae_calc(forward_m2, train_sub)
+MAE_backward <- mae_calc(backward_m2, train_sub)
+MAE_stepwise <- mae_calc(stepwise_m2, train_sub)
+MAE_junk <- mae_calc(junk_m, train_sub)
+```
+
+```{r, mape calc}
+mape_calc <- function(model, dat){
+  model_obj <- model
+  # saleprice is the first column
+  pct <- abs(model_obj$residuals)/dat[[1]]
+  MAPE <- mean(pct)
+  
+  return(MAPE)
+}
+```
+
+```{r, calculate mape for run2}
+MAPE_forward <- mape_calc(forward_m2, train_sub)
+MAPE_backward <- mape_calc(backward_m2, train_sub)
+MAPE_stepwise <- mape_calc(stepwise_m2, train_sub)
+MAPE_junk <- mape_calc(junk_m, train_sub)
+
+```
+
+Below are the final models and metrics for goodness of fit (e.g., AIC, BIC, Adjusted R-squared, MAE, MAPE, MSE, RMSE). A "junk" model was also included in the results to serve as another point of comparison, and this Junk Model included two hand-picked predictors. All variable selection methods utilized the stepAIC() method in R, which selects predictors based on their AIC values. The model VIF values are in a separate table.
+
+```{r}
+library(stargazer)
+# have to include this separately since it displays text when package is loaded
+```
+
+```{r,generate stargazer table,results='asis'}
+# a lot of custom formatting
+# removed model numbers
+# changed column names
+# simplified # of digits
+# only show certain summary stats & added AIC
+# moved intercept to the top of the model
+stargazer(forward_m2, backward_m2, stepwise_m2, junk_m, 
+          title="Results", align=TRUE, dep.var.labels=c("SalePrice"),
+          omit.stat=c("LL","n","rsq","f"), 
+          column.labels = c("Forward", "Backward", "Stepwise", "Junk"),
+          type="html", report=('vcp*'), intercept.bottom = FALSE, df = FALSE,
+          digits = 2, digits.extra = 1, model.numbers = FALSE,
+          add.lines=list(c("AIC", round(AIC(forward_m2),2), round(AIC(backward_m2),2),round(AIC(stepwise_m2),2),round(AIC(junk_m),2)),
+                         c("BIC", round(BIC(forward_m2),2), round(BIC(backward_m2),2),round(BIC(stepwise_m2),2),round(BIC(junk_m),2)),
+                         c("MAE", round(MAE_forward,2), round(MAE_backward,2), round(MAE_stepwise,2),round(MAE_junk,2)),
+                    c("MAPE",paste0(round(MAPE_forward*100,2),"%"),paste0(round(MAPE_backward*100,2),"%"), paste0(round(MAPE_stepwise*100,2),"%"), paste0(round(MAPE_junk*100,2),"%")),
+                    c("MSE",round(mean(residuals(forward_m2))^2,2), round(mean(residuals(backward_m2))^2,2), round(mean(residuals(stepwise_m2))^2,2), round(mean(residuals(junk_m))^2,2))))
+
+```
+<style>
+
+table, td, th {
+  border: none;
+  padding-left: 1em;
+  padding-right: 1em;
+  min-width: 50%;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+</style>
+
+First, all variable selection methods (forward selection, backward elimination, and stepwise method) chose the same set of predictors. The predictors they chose are as follows:
+
+* TotalFloorSF
+* Foundation
+* HouseAge
+* TotalSqftCalc
+* Exterior1
+* TotalBsmtSF
+* KitchenQual
+* GarageArea
+* BedroomAbvGr
+* QualityIndex
+* LotShape
+
+Therefore, in comparison to the Junk Model, the model that used variable selection methods, which we will refer to as Model 1, is the superior model from a goodness of fit metrics standpoint. In other words, it has lower AIC, BIC, MAE, MSE, and RMSE as well as a higher Adjusted R squared value. It ranks as 1 across all of these metrics. 
+
+Although the slight edge is given to Model 1 on AIC and BIC compared to the Junk Model, their MAE values are drastically different. Model 1 has a MAE of `r paste0("$",prettyNum(round(MAE_forward,0),big.mark=","))`, while the Junk Model has a MAE of `r paste0("$",prettyNum(round(MAE_junk,0),big.mark=","))`. 
+
+While the trends for RMSE are the same, RMSE gives additional weight to large residuals since the errors are squared before they are averaged. Therefore, Model 1 has a much smaller MAE relative to the Junk Model and therefore has better predictions for the in-sample or training data.
+
+While it is not uncommon for all three variable selection methods (forward, backward, stepwise) to select the same set of predictors, this result does not always occur. For instance, we could have had a scenario where a given model ranked higher on AIC but had a lower MAE relative to another model. We elect to include the results from all three variable selection methods because they help to promote a dialogue as to which model is best. 
+
+Moreover, the evaluation of a model is not refined to one specific metric, which is why it is helpful to have various metrics that help present strengths (and weaknesses) of a given model. All of these metrics present tradeoffs in accuracy and precision. Ultimately, having visibility into business goals helps to ensure that the appropriate model is selected based on the available metrics. 
+
+After removing the Neighboorhood and OverallQual variables, the models from each method all have VIFs < 10 so we have no concerns about multicollinearity. 
+
+```{r}
+forward_vif2 <- sort(vif(forward_m2)[,1],decreasing=T)
+backward_vif2 <- sort(vif(backward_m2)[,1],decreasing=T)
+stepwise_vif2 <- sort(vif(stepwise_m2)[,1],decreasing=T)
+
+total_vif <- cbind(forward_vif2,backward_vif2,stepwise_vif2)
+
+kable(total_vif, "html", col.names=c("Forward","Backward","Stepwise"), align = 'l', digits=2) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "VIF Output" = 3))
+```
+
+There is one final observation: for the categorical variables in the final model, not all levels of each categorical variable are significant. For instance, LotShape of IR3 and Regular are significant but a LotShape of IR2 is insignificant at the .10 level. This trend follows for all remaining categorical predictors. Therefore, it might be worth considering collapsing some of these categorical variables into fewer categories so that the final model contains only significant predictors.
+
+## Section 4: Predictive Accuracy
+
+Since the variable selection methods have all selected the same predictors, we will move forward for the rest of the assignment using Model 1. We will include the Junk Model for comparison purposes.
+
+In this section, we start to evaluate the accuracy of our model on the test data. We compute MAE, MAPE, MSE, and RMSE for these two models. The results are presented in the table below.
+
+```{r, run2 on test set}
+# generate preds
+forward.test <- predict(forward_m2,test.df)
+junk.test <- predict(junk_m,test.df)
+
+# Abs Pct Error
+MAPE_t <- mape_calc(forward_m2,test.df)
+MAPE_junk_t <- mape_calc(junk_m,test.df)
+
+# MAE
+MAE_t <- mae_calc(forward_m2,test.df)
+MAE_junk_t <- mae_calc(junk_m,test.df)
+
+# MSE
+MSE_t_tmp <- test.df %>%
+  mutate(pred = forward.test,
+         res = SalePrice - pred,
+         mse = mean(res^2)) 
+
+MSE_t <- unique(MSE_t_tmp$mse)
+
+RMSE_t <- sqrt(MSE_t)
+
+MSE_junk_t <- test.df %>%
+  mutate(pred = junk.test,
+         res = SalePrice - pred,
+         mse = mean(res^2)) %>%
+  distinct(mse)
+
+MSE_junk_t <- MSE_junk_t$mse
+
+RMSE_junk_t <- sqrt(MSE_junk_t)
+
+# putting it all together
+model_metrics <- rbind(MAE_t,MAPE_t,MSE_t,RMSE_t)
+junk_metrics <- rbind(MAE_junk_t,MAPE_junk_t,MSE_junk_t,RMSE_junk_t)
+test_metrics <- cbind(model_metrics,junk_metrics)
+```
+
+```{r}
+kable(test_metrics, "html", col.names=c("Model 1","Junk Model"), align = 'l', digits = 2) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "test.df Metrics" = 2))
+```
+
+From this table, we can see that on the training data, Model 1 performed better, and it also performs better on the test data on the basis of MAE, MAPE, and RMSE.
+
+While the best model for in-sample data can also be the best on out-of-sample data, this result does not always occur. Again, having multiple models for comparison and utilizing various goodness of fit metrics helps to promote a dialogue on the tradeoffs between models. In our specific scenario, we do not have to worry about selecting a model based on its performance in-sample and out-of-sample, since we are really only interested in the model performance of Model 1. 
+
+Specifically, Model 1 for the training data has a MAPE of `r paste0(round(MAPE_forward*100,1),"%")` compared to `r paste0(round(MAPE_t*100,1),"%")` on the test data. This means that on average, the error for SalePrice is +/-`r paste0(round(MAPE_t*100,1),"%")`. The MAE value for Model 1 is slightly higher (worse) on the test data, while the MAE and MAPE values for the Junk Model are slightly lower on the test data. 
+
+Of note, however, the RMSE is slightly better for the training data (Model 1 RMSE = `r paste0("$",prettyNum(round(sqrt(mean(residuals(forward_m2)^2)),0),big.mark=","))`) than the test data (Model 1 RMSE = `r paste0("$",prettyNum(round(RMSE_t,0),big.mark=","))`). Generally, the metrics for test data will be worse than the evaluation metrics for the training data, but when a model has better predictive accuracy on in-sample data it might mean that there is overfitting. Utilizing more training vs testing sets from the same data (i.e., cross validation) or potentially reducing model complexity might help to improve model accuracy on the test data. However, validation of this model on the training data will help to corroborate the appropriate next steps, as poor fit on the test data also might speak to an inadequate (training) model.
+
+It is important to keep in mind that all of these metrics are relative and serve to compare models with a different number/set of predictors to one another. MAE will always be less than or equal to RMSE, but MAE and RMSE present different considerations for evaluating the fit of a model. 
+
+For instance, MAE is the average magnitude of errors, while the RMSE takes the square root of the squared difference between residuals and fitted values. Thus, RMSE gives more weight to values that are farther away from their actual value. If MAE and RMSE are close together or about equal, then we know that all the errors are of the same magnitude. However, in our case, MAE and RMSE are not equal, which tells us that there is increased variability in the errors of our data. That is, our errors are not of the same magnitude. This difference in MAE and RMSE helps to highlight that further analysis on outliers and influential points is required. 
+
+In this manner, there is not a superior metric (MAE vs RMSE), but rather both metrics help to provide additional context with which to evaluate the fit of a given model. The same points could be said about all the metrics utilized in this assignment thus far, as they all present a slightly different perspective of model fit. Together, they help to tell a more complete story on which model has the best fit, especially in the context of business objectives.
+
+## Section 5: Operational Validation
+
+Although evaluating average values can be helpful for assessing the goodness of fit for a model, this information does not necessarily translate well from a business perspective. Therefore, we will further break down the accuracy of Model 1 by grouping its predicted values into a series of grades. These grades are divided into how close the predicted values are to the actual SalePrice values. In this manner, this information will help to evaluate the accuracy of the model and if it is adequate for the business goals.
+
+Of note, prediction grades in a 'real world' scenario should be defined by business stakeholder(s).
+
+```{r, pred grades function}
+# prediction grades should be defined by business area
+pred_grade_function <- function(pct){
+  pred_grade <- ifelse(pct<=0.10,'Grade 1: [0.0.10]',
+                      ifelse(pct<=0.15,'Grade 2: (0.10,0.15]',
+                             ifelse(pct<=0.25,'Grade 3: (0.15,0.25]',
+                                    'Grade 4: (0.25+]')))
+  
+  pred_table <- table(pred_grade)
+  final_table <- paste0(round(pred_table/sum(pred_table)*100,2),"%")
+  
+  return(final_table)
+}
+
+```
+
+```{r, assign pred grades}
+# train data
+forward.pct.train <- abs(forward_m2$residuals)/train_sub[[1]]
+train_table <- pred_grade_function(forward.pct.train)
+
+# test data
+forward.pct.test <- abs(MSE_t_tmp$res)/test.df[[1]]
+test_table <- pred_grade_function(forward.pct.test )
+
+# putting it all together
+table_metrics <- cbind(train_table,test_table)
+```
+
+```{r, show pred grades}
+# generate table of results
+text_tbl <- data.frame(
+  Items = c("Grade 1: [0.0.10]","Grade 2: (0.10,0.15]","Grade 3: (0.15,0.25]","Grade 4: (0.25+]"),
+  Features = table_metrics)
+
+kable(text_tbl, "html", col.names=c("","Training Data","Test Data"), align = 'l') %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "Model 1 Prediction Grades" = 2))
+
+```
+
+This table helps to further highlight how the predictive accuracy of the model is worse on the test data. We can see that the majority (`r train_table[[1]]`) of the training data has a predictive accuracy that is within 10% of the actual SalePrice value. 
+
+In contrast, Model 1 on the test data, only has a predictive accuracy within 10% on `r test_table[[1]]` of the observations. We can see that across most other Grades, the test data has slightly higher percentages. This result means that there is more data in the the lower Grades in the test data compared to the training data. Even though the results are poorer on the test data, in both cases, this model is of 'underwriting quality' since it scores more than 50% of the data within 10% accuracy. Validation of Model 1 is needed before we can determine that this is our final model.
+
+## Section 6: Final Model Selection
+
+We now perform model adequacy checking steps on our selected model. All of these steps are performed on the training data.
+
+We begin by analyzing residual plots.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(forward_m2, col=cbPalette[6])
+```
+
+Right away, we can see that the residuals do not demonstrate a constance variance and there are some high leverage points (R had a warning message for three points that had a leverage > 1, which is beyond the scope of the plot). The residuals vs fitted values have a slight cone shape, which means that variable transformation could improve this pattern.
+
+Therefore, our first step will be to refit Model 1 using logSalePrice instead of SalePrice and compare the residual plots. We will call the model with logSalePrice Model 2.
+
+```{r, train test split w/ log saleprice}
+# neighborhood & overallqual removed b/c of high VIF
+vars_in_scope <- c("logSalePrice", "TotalFloorSF", "HouseAge", "QualityIndex", "LotShape", "HouseStyle", "TotalBsmtSF", "KitchenQual", "FullBath", "BedroomAbvGr", "TotalSqftCalc", "Exterior1", "Foundation", "GarageArea")
+
+ames_subdat2 <- ames_subdat %>%
+  dplyr::select(vars_in_scope) 
+
+ames_split <- initial_split(ames_subdat2, prop = 0.70)
+
+logtrain.df <- training(ames_split) 
+
+logtest.df <- testing(ames_split)
+
+# na.omit
+logtrain.df <- na.omit(logtrain.df)
+logtest.df <- na.omit(logtest.df)
+
+# need to inspect and adjust some rows of data
+# logtrain.df <- logtrain.df %>%
+#   dplyr::filter(KitchenQual != "Po")
+
+# logtest.df <- logtest.df %>%
+#   dplyr::filter(Exterior1 != "PreCast" & Exterior1 != "CBlock" & Foundation != "Wood" & KitchenQual != "Po")
+
+# there are values in our test set that are not in our train set
+# additional levels are removed b/c we do dffits removal so we are 'cheating' here a little bit
+logtest.df <- logtest.df %>%
+  filter(!(KitchenQual %in% c('Po')) & !(Exterior1 %in% c('ImStucc','CBlock')) & Foundation != 'Wood' & LotShape != 'IR3')
+
+```
+
+```{r, fit m2 on log saleprice}
+model2.lm <- lm(logSalePrice ~ TotalFloorSF + Foundation + HouseAge + TotalSqftCalc + Exterior1 + TotalBsmtSF + KitchenQual + GarageArea + BedroomAbvGr + QualityIndex + LotShape, data=logtrain.df)
+```
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(model2.lm, col=cbPalette[6])
+```
+
+Right away, we can see an improved fit with logSalePrice on the residuals vs fitted values as they are random and the red line is flatter. There is also less skewness in the upper tail. However, there are still some high leverage points that are of concern. R even has a warning message for three high leverage points that are beyond the scope of the plot. Therefore, we will identify and remove influential points using DFFITS. Because n = 1690 and p = 41, then our DFFITS cutoff point is .3192832.
+
+DFFITS has identified that there are 91 homes that are beyond our cutoff point. We will remove these points and then re-evaluate our diagnostic plots, which are shown below.
+
+```{r, dfitts}
+dffitslog <- dffits(model2.lm)
+ames_dffits <- cbind(logtrain.df,dffitslog)
+
+# identify 57 influential points
+dffits_count <- ames_dffits %>%
+  dplyr::filter(dffitslog >= .3192832 | dffitslog <= -.3192832)
+
+# remove these influential points
+logtrain.clean <- ames_dffits %>%
+  anti_join(dffits_count) %>%
+  dplyr::select(-dffitslog)
+
+model3.lm <- lm(logSalePrice ~ TotalFloorSF + Foundation +  HouseAge + TotalSqftCalc + Exterior1 + TotalBsmtSF + KitchenQual + GarageArea + BedroomAbvGr + QualityIndex + LotShape, data=logtrain.clean)
+
+par(mfrow=c(2,2)) 
+plot(model3.lm, col=cbPalette[6])
+
+```
+
+We can readily see that now that with the influential points removed, the residual plots are more zoomed in. We can see that we meet the regression assumptions of constant variance and normality and do not appear to have any influential points (no points are in the lower right of the Residuals vs Leverage plot). 
+
+Although this model is adequate, we originally did not include logSalePrice as the predictor when applying our variable selection methods. Therefore, we repeat the variable selection process now with logSalePrice as the chosen response variable using the same pool of candidate predictor variables (without Neighborhood and OverallQual).
+
+```{r, log model stepwise, include=FALSE}
+#logtrain.clean <- na.omit(logtrain.clean) # safety net b/c was getting stepAIC() error
+
+# we elect not to write this using a function since we are only using this code once
+# Definethe upper model as the FULL model
+log.upper.lm <- lm(logSalePrice ~ .,data=logtrain.clean)
+
+# Define the lower model as the Intercept model
+log.lower.lm <- lm(logSalePrice ~ 1,data=logtrain.clean)
+
+# Need a SLR to initialize stepwise selection
+log.sqft.lm <- lm(logSalePrice ~ TotalSqftCalc,data=logtrain.clean)
+
+# Call stepAIC() for variable selection
+
+logforward.lm <- stepAIC(object=log.lower.lm,scope=list(upper=log.upper.lm,lower=log.lower.lm),
+                      direction=c('forward'))
+
+logbackward.lm <- stepAIC(object=log.upper.lm,direction=c('backward'))
+
+logstepwise.lm <- stepAIC(object=log.sqft.lm,scope=list(upper=formula(log.upper.lm),lower=~1),
+                       direction=c('both'))
+
+logjunk.lm <- lm(logSalePrice ~ HouseAge + Foundation, data=logtrain.clean)
+```
+
+With logSalePrice as the response variable, all three variable selection methods have chosen the same predictors in their model. These predictors are slightly different than Model 1, as they do not include HouseStyle and BedroomAbvGr. Additionally, their VIF values are all < 10 so we do not have multicollinarity issues to address.
+
+We now show selected goodness of fit metrics comparing Model 1 and Model 2 on both the training and test data.
+
+```{r, log train gof}
+log_MAE <- mae_calc(logforward.lm, logtrain.clean)
+
+log_MAPE <- mape_calc(logforward.lm, logtrain.clean)
+
+sum_logtrain <- summary(logforward.lm)
+log_RMSE <- round(sum_logtrain$sigma,2)
+log_adjr <- paste0(round(sum_logtrain$adj.r.squared*100,2),"%",sep="")
+
+logmodel_trainmetrics <- rbind(round(log_MAE,2),round(log_MAPE,2),round(log_RMSE,2),log_adjr)
+
+# for comparison
+RMSE <- sqrt(mean(residuals(forward_m2)^2))
+Adj_Rsquared <- paste0(round(summary(forward_m2)$adj.r.squared*100,2),"%")
+
+model_trainmetrics <- rbind(round(MAE_forward,2),round(MAPE_forward,2),round(RMSE,2),Adj_Rsquared)
+
+```
+
+```{r, log test gof}
+logforward.test.preds <- predict(logforward.lm,logtest.df)
+
+log_MAPE_test <- mape_calc(logforward.lm,logtest.df)
+
+log_MAE_test <- mae_calc(logforward.lm,logtest.df)
+
+# MSE/RMSE
+MSE_t_tmp <- logtest.df %>%
+  mutate(pred = logforward.test.preds,
+         res = logSalePrice - pred,
+         mse = mean(res^2)) 
+
+log_MSE_t <- unique(MSE_t_tmp$mse)
+
+log_RMSE_test <- sqrt(log_MSE_t)
+
+# adjusted r-squared is tricky on test set
+log_adjr_test <- paste0(round(rSquared(logtest.df$logSalePrice, resid = logtest.df$logSalePrice -logforward.test.preds)*100,2),"%")
+
+logmodel_testmetrics <-  rbind(round(log_MAE_test,2),round(log_MAPE_test,2),round(log_RMSE_test,2),log_adjr_test)
+
+# other test set metrics for comparison
+# just need to calculate adjusted r-squared
+Adj_Rsquared_test <- log_adjr_test <- paste0(round(rSquared(test.df$SalePrice, resid = test.df$SalePrice - forward.test)*100,2),"%")
+
+model_testmetrics  <- rbind(round(MAE_t,2),round(MAPE_t,2),round(RMSE_t,2),Adj_Rsquared_test)
+
+# putting it all together 
+# don't want to go tidy on this actually
+full_metrics <- cbind(model_trainmetrics,logmodel_trainmetrics,model_testmetrics,logmodel_testmetrics) 
+
+rownames(full_metrics) <- c("MAE","MAPE","RMSE","Adjusted R-squared")
+```
+
+```{r}
+# digits=2 isn't working so ended up rounding above
+kable(full_metrics, "html", col.names=c("Model 1","Model 2","Model 1","Model 2"), align = 'l',digits=2) %>%
+  kable_styling(full_width = F, position = "left") %>%
+  add_header_above(c("", "train.df Metrics" = 2,"test.df Metrics" = 2))
+```
+
+Overall, both Model 1 and Model 2 generally perform better on the training data than the test data. While MAE, MAPE, and RMSE have different scales when comparing Model 1 and Model 2, we can more directly compare these models on the basis of Adjusted R-squared (which also happens to be a byproduct of RMSE, a desirable metric for predictive accuracy). Model 2 has a better Adjusted R squared value than Model 1.
+
+Of note, there is a big gap in performance between the training set and test set for both models (but the difference matters for Model 2). This result is a sign that we are still overfitting the data. While out of scope for this assignment, methods such as penalized regression methods or even PCA might help to reduce the predictors within the model and ensure that there is minimal difference in performance between the training set and test set.
+
+**Our Final Model is** Model 2, which includes logSalePrice as the response variable and the following predictors:
+
+* TotalFloorSF
+* Foundation
+* HouseAge
+* TotalSqftCalc
+* Exterior1
+* TotalBsmtSF
+* KitchenQual
+* GarageArea
+* QualityIndex
+* LotShape
+* BedroomAbvGr
+
+This model is selected as the Final Model since it meets the assumptions of linear regression and includes less predictors while still not compromising for predictive accuracy.
+
+# Summary and Conclusions
+
+In this assignment, Ames housing data was utilized to build an appropriate regression model. Drop conditions on BuildingType and SalePrice were applied up front, and the data was split 70/30 into training and testing sets. Forward selection, backward elimination, and stepwise variable selection methods were applied to the training data, and all methods selected the same predictors in the regression model. 
+
+Unfortunately, the selected model did not conform to the assumptions of constant variance and demonstrated high leverage points. Therefore, the logSalePrice variable was chosen as the response variable and the process repeated to find a more appropriate model. Steps were also taken to remove influential points. Commentary was provided throughout on model fit and predictive accuracy on the training and test sets. In the end, the final model selected had logSalePrice as the response variable and 11 predictors.
+
+After working on this problem and this data for several weeks, the analyses demonstrated across these assignments highlight several challenges faced when creating any predictive model.
+
+First, in order to improve the predictive accuracy of the model, consideration has to be given for the types of homes that are included at the start. Although we originally excluded data on the basis of BuildingType and high SalePrice, we could have been more strict in reducing observations (homes) for our model. 
+
+It is also worth noting that this data contains housing data for five years. Analysis could be done on the SalePrice and predictors across these five years to determine if there is variability in this data year-over-year. All of this information speaks to the point that if there is less variability in SalePrice and the corresponding predictor values, then this helps to improve model accuracy. However, excluding more data points is not always desirable, but nonetheless the predictive accuracy could be improved if there is a smaller range in SalePrice or even the allowable values for the predictors. 
+
+Next, the Final Model includes several categorical variables but not all categories are statistically significant. Therefore, exploration is needed on how to best collapse these predictors into potentially more meaningful variables. This type of step might ulimately change the predictors selected or even enable the Final Model to include only significant predictors. Either way, the end result will only be better, as there would be less noise in the Final Model.
+
+Another key point in improving the predictive accuracy of the model is the business objectives. As it stands, it is unclear if the purpose of this regression model is for purely inferential purposes or predictive purposes. If the model is for inferential purposes, then to improve the predictive accuracy of the model, cross validation could be applied multiple times with models selected from variable selection methods (i.e. k crossfold validation). This exercise could help to validate that the Final Model includes the most appropriate predictors. 
+
+However, if the model is for predictive purposes, then obtaining more recent housing data would be desirable. Utilizing k-crossfold validation would be a helpful step as well, but the variables in the data set might speak to limitations in the predictive accuracy of a predictive model. For instance, there is no data regarding the surrounding area, such as school system ratings or crime ratings. It is common knowledge that a similar type of home in one area could sell for a very different price if the two areas differ on the basis of school systems and crime (all other things being equal). Therefore, a model is only as good as the data it is able to use for that model-building process, and if the goal is to create a predictive model to predict future saleprices then this type of discussion is needed up front. For instance, business goals may have to be adjusted based on the available data.
+
+Lastly, it is clear that variable transformation plays an integral role in the model building process. The Final Model chosen utilized logSalePrice, not SalePrice, which presents some challenges in interpreting GOF metrics as the scale is different. Moreover, this data set is primarily categorical, and not all categories play a key role in predicting SalePrice. Therefore, the Ames assignments have helped to show that more time is needed to ensure that the data is cleansed properly up front so that the variable selection methods are truly working with the best data. 
+
+Overall, the Ames assignments have shown that the model building process is circular, not linear. This insight is also important when working with business stakeholers and helps to demonstrate that sufficient time and effort are needed to create the best model, regardless of business goals.
